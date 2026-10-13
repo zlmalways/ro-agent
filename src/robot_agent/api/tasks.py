@@ -136,3 +136,15 @@ async def decide_task(task_id: str, body: DecisionInput, request: Request):
         raise HTTPException(409, str(exc)) from None
     except NotFoundError:
         raise HTTPException(404, "NOT_FOUND") from None
+
+
+@router.get("/api/robot-agent/tasks/{task_id}/events")
+async def task_events(task_id: str, request: Request, after: int = 0):
+    from .resources import web_context
+    context = await web_context(request)
+    try:
+        return await request.app.state.service.events(context, task_id, after)
+    except NotFoundError:
+        raise HTTPException(404, "NOT_FOUND") from None
+    except PlanError as exc:
+        raise HTTPException(422, str(exc)) from None

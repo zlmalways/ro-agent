@@ -6,7 +6,7 @@ import json
 from uuid import uuid4
 
 from robot_agent.domain.models import PlanError, RobotEvent, SendObservation
-from robot_agent.protocol.dlv0_schema import command_frame, parse_frame
+from robot_agent.protocol.dlv0_schema import cancel_frame, command_frame, parse_frame
 
 
 @dataclass(frozen=True)
@@ -77,3 +77,16 @@ class Dlv0Robot:
             if self.sessions.get(key) is session:
                 del self.sessions[key]
                 await self.service.on_robot_disconnected(session.binding, session.generation)
+
+    async def cancel(self, command):
+        async with self.write_lock:
+            if not await self.write_gate.healthy():
+                return SendObservation(False)
+            session = self.sessions.get((command.customer_id, command.robot_binding_id))
+            if session is None:
+                return SendObservation(False)
+            try:
+                await session.send(cancel_frame(command.command_id))
+            except (OSError, RuntimeError):
+                return SendObservation(False)
+            return SendObservation(True)

@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Robot Agent · 任务控制台</title>
+  <link rel="stylesheet" href="/client/style.css">
+</head>
+<body>
+<main>
+  <header><span class="eyebrow">ROBOT AGENT</span><h1>告诉机器人，需要做什么。</h1><p>查看计划、确认执行，并追踪机器人实际反馈。</p></header>
+  <section class="credentials"><label>访问凭据<input id="credential" type="password" autocomplete="off" placeholder="输入管理员发放的访问凭据"></label><p>凭据只保存在当前页面，不写入浏览器存储。</p></section>
+  <div class="layout">
+    <section class="composer"><h2>创建任务</h2><form id="submit-form"><label>任务指令<textarea id="goal" rows="5" required placeholder="例如：去指定的桌边，调用已登记的拿杯技能。"></textarea></label><button type="submit">提交任务</button></form><div class="divider"></div><label>语音文件<input id="audio" type="file" accept="audio/wav"></label><button id="audio-submit" class="secondary">提交语音任务</button><p class="muted">语音识别未启用时，会明确返回不可用。</p><div class="divider"></div><form id="lookup-form"><label>任务编号<input id="lookup" placeholder="输入已有任务编号"></label><button class="secondary">查询任务</button></form></section>
+    <section class="task"><div class="task-head"><h2>任务进度</h2><span id="status">尚未提交</span></div><p id="task-id" class="muted"></p><p id="reason" role="status"></p><p id="question"></p><form id="answer-form" hidden><label>澄清回答<input id="answer" required></label><button type="submit">提交回答</button></form><div id="decisions" hidden><button id="approve">批准计划</button><button id="reject" class="secondary">拒绝计划</button></div><h3>执行计划</h3><ol id="plan"><li class="muted">提交后在这里查看完整计划。</li></ol><h3>机器人执行事实</h3><div id="results" class="muted">尚无机器人反馈。</div><button id="cancel" class="danger" hidden>取消任务</button><p class="muted">取消请求不等于机器人已物理停止；未知结果会保留并等待核对。</p></section>
+  </div><p id="error" role="alert"></p>
+</main>
+<script src="/client/app.js" defer></script>
+</body></html>

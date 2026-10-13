@@ -2,6 +2,9 @@
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
+from pathlib import Path
 
 from robot_agent.adapters.identity import ConfiguredIdentity
 from robot_agent.api.resources import router as resources_router
@@ -19,6 +22,12 @@ def create_app(*, service=None, identity=None, resources=None, inputs=None):
     app.include_router(tasks_router)
     app.include_router(resources_router)
     app.include_router(robot_router)
+    client_dir = Path(__file__).resolve().parents[2] / "client"
+    app.mount("/client", StaticFiles(directory=client_dir), name="client")
+
+    @app.get("/", include_in_schema=False)
+    async def client_index():
+        return FileResponse(client_dir / "index.html")
 
     @app.exception_handler(DependencyUnavailable)
     @app.exception_handler(PreflightBlocked)

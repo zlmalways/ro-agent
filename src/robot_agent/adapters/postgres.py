@@ -272,6 +272,13 @@ class TaskTransaction:
         await self.connection.execute("UPDATE ra_inputs SET state='FAILED' WHERE customer_id=$1 AND actor_id=$2 AND operation='audio' AND key=$3",
                                       context.customer_id, context.actor_id, key)
 
+    async def task_events(self, task_id, after, limit):
+        task = await self.load_task(task_id)
+        rows = await self.connection.fetch("""SELECT seq,task_version,event_type,public_payload FROM ra_task_events
+            WHERE customer_id=$1 AND task_id=$2 AND seq>$3 ORDER BY seq LIMIT $4""", task.customer_id, task_id, after, limit)
+        return [{"seq": row["seq"], "task_version": row["task_version"], "event_type": row["event_type"],
+                 "public_payload": json.loads(row["public_payload"])} for row in rows]
+
 
 class SystemTaskTransaction(TaskTransaction):
     """Private execution boundary; no HTTP handler accepts this context."""

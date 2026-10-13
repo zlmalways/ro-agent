@@ -22,10 +22,16 @@ def task_view(task):
                     tuple({"command_id": command.command_id, "step_id": command.step_id,
                            "robot_binding_id": command.robot_binding_id, "action": command.wire_skill,
                            "args": dict(command.wire_args), "dispatch_state": command.dispatch_state,
-                           "outcome": command.outcome, "evidence_ids": command.evidence_ids}
+                           "outcome": command.outcome, "evidence_ids": command.evidence_ids,
+                           "description": ("导航到：" + str(command.wire_args.get("location", ""))
+                                           if command.wire_skill == "move_to" else "调用技能：" + str(command.wire_args.get("skill_id", "")))}
                           for command in task.commands), task.clarification_id,
                     tuple({"step_id": step.step_id, "action": step.action, "args": dict(step.args), "depends_on": step.depends_on,
-                           "source_refs": step.source_refs} for step in task.plan.steps) if task.plan else ())
+                           "source_refs": step.source_refs,
+                           "description": ("导航到：" + str(step.args.get("location", "")) if step.action == "move_to"
+                                           else "调用技能：" + task.snapshot.capability_labels.get(str(step.args.get("skill_id", "")),
+                                                                                              str(step.args.get("skill_id", ""))))}
+                          for step in task.plan.steps) if task.plan else ())
 
 
 class TaskService:
@@ -439,3 +445,10 @@ class TaskService:
             if task.customer_id != context.customer_id or task.actor_id != context.actor_id:
                 raise NotFoundError(task_id)
             return task_view(task)
+
+    async def events(self, context, task_id, after):
+        if after < 0:
+            raise PlanError("invalid event cursor")
+        async with self.store.unit_of_work(context) as tx:
+            events = await tx.task_events(task_id, after, 100)
+        return {"events": events, "next_seq": events[-1]["seq"] if events else after}
