@@ -77,3 +77,12 @@ async def test_wrong_robot_feedback_does_not_finish_task():
     await service.on_robot_event(RobotEvent("forged", "other-customer", "test-binding", 1, command.command_id, "succeeded"))
     assert (await service.get(CONTEXT, view.task_id)).state == "RUNNING"
     assert len(robot.sent) == 1
+
+
+async def test_explicit_plan_limit_rejects_long_candidate():
+    service, robot, _ = build_service()
+    service.max_plan_steps = 1
+    result = await service.submit(CONTEXT, TaskInput("req", "web", "test", ""), "key")
+    assert result.state == "FAILED"
+    await service.dispatch_next("test-deployment")
+    assert robot.sent == []

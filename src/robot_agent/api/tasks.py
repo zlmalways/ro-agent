@@ -45,7 +45,8 @@ async def submit_audio(request: Request, audio: UploadFile = File(...)):
         raise HTTPException(401, "UNAUTHENTICATED") from None
     key = request.headers.get("idempotency-key", "")
     try:
-        view = await request.app.state.inputs.audio(context, await audio.read(), audio.content_type or "", key)
+        view = await request.app.state.inputs.audio(context, await audio.read(request.app.state.inputs.max_audio_bytes + 1),
+                                                    audio.content_type or "", key)
     except DependencyUnavailable as exc:
         raise HTTPException(503, str(exc)) from None
     except PlanError as exc:

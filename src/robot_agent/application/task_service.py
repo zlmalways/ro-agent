@@ -35,7 +35,8 @@ def task_view(task):
 
 
 class TaskService:
-    def __init__(self, *, store, planner, robot, resources, policy, catalog, queue_policy=None, ownership=None):
+    def __init__(self, *, store, planner, robot, resources, policy, catalog, queue_policy=None, ownership=None,
+                 max_text_chars=None, max_plan_steps=None):
         self.store = store
         self.planner = planner
         self.robot = robot
@@ -46,10 +47,14 @@ class TaskService:
         self.executor = Executor()
         self.queue_policy = queue_policy
         self.ownership = ownership
+        self.max_text_chars = max_text_chars
+        self.max_plan_steps = max_plan_steps
 
     async def submit(self, context, value, request_key):
         if not value.text.strip() or not request_key:
             raise PlanError("empty task/request key")
+        if self.max_text_chars is not None and len(value.text) > self.max_text_chars:
+            raise PlanError("TEXT_LIMIT_EXCEEDED")
         digest = sha256(json.dumps({"channel": value.channel, "text": value.text, "source_ref": value.source_ref},
                                   sort_keys=True, separators=(",", ":")).encode()).hexdigest()
         async with self.store.unit_of_work(context) as tx:
@@ -68,6 +73,8 @@ class TaskService:
         provider_error = None
         try:
             candidate = await self.planner.plan(value.text, [], snapshot)
+            if self.max_plan_steps is not None and len(candidate.steps) > self.max_plan_steps:
+                raise PlanError("PLAN_LIMIT_EXCEEDED")
             if candidate.outcome == "clarify":
                 task = replace(task, state="NEEDS_CLARIFICATION", clarification=candidate.question, clarification_id=str(uuid4()))
             elif candidate.outcome == "unsupported":
@@ -142,6 +149,8 @@ class TaskService:
         snapshot = await self.resources.snapshot(context)
         answers = task.answers + (answer,)
         candidate = await self.planner.plan(task.goal_text, list(answers), snapshot)
+        if self.max_plan_steps is not None and len(candidate.steps) > self.max_plan_steps:
+            raise PlanError("PLAN_LIMIT_EXCEEDED")
         records = ()
         if candidate.outcome == "clarify":
             changed = replace(task, clarification=candidate.question, clarification_id=str(uuid4()), answers=answers)

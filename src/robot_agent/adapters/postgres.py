@@ -6,6 +6,7 @@ from hashlib import sha256
 import json
 from pathlib import Path
 from datetime import datetime, timezone
+import sys
 
 from robot_agent.domain.models import (
     Command, ConflictError, ContextSnapshot, NotFoundError, Plan, PlanStep, Task,
@@ -45,6 +46,10 @@ class PostgresStore:
 
     async def migrate(self):
         migrations = Path(__file__).resolve().parents[3] / "db/migrations"
+        if not migrations.is_dir():
+            migrations = Path(sys.prefix) / "share/ro-agent/db/migrations"
+        if not migrations.is_dir():
+            raise FileNotFoundError("packaged database migrations are missing")
         async with self.pool.acquire() as connection, connection.transaction():
             await connection.execute("SELECT pg_advisory_xact_lock(719002601)")
             await connection.execute("""CREATE TABLE IF NOT EXISTS ra_schema_migrations
@@ -307,6 +312,17 @@ class SystemTaskTransaction(TaskTransaction):
         row = await self.connection.fetchrow("SELECT * FROM ra_robot_bindings WHERE customer_id=$1 AND binding_id=$2",
                                              customer_id, binding_id)
         return dict(row) if row else None
+
+    async def provision_binding(self, value):
+        existing = await self.get_binding(value["customer_id"], value["binding_id"])
+        if existing:
+            if existing["wire_robot_id"] != value["wire_robot_id"] or set(existing["allowed_capabilities"]) != set(value["allowed_actions"]):
+                raise ConflictError("binding changes require explicit maintenance, startup does not overwrite")
+            return
+        await self.connection.execute("""INSERT INTO ra_robot_bindings
+            (customer_id,binding_id,wire_robot_id,credential_ref,allowed_capabilities,enabled)
+            VALUES ($1,$2,$3,$4,$5,true)""", value["customer_id"], value["binding_id"], value["wire_robot_id"],
+            value["token_env"], list(value["allowed_actions"]))
 
     async def customer_bindings(self, customer_id):
         rows = await self.connection.fetch("SELECT * FROM ra_robot_bindings WHERE customer_id=$1 AND enabled=true ORDER BY binding_id",

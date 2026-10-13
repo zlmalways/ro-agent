@@ -49,3 +49,13 @@ async def test_api_rejects_forged_trusted_fields(persisted_service):
             result = await client.post("/api/robot-agent/tasks", json={"text": "test", field: "forged"}, headers=HEADERS)
             assert result.status_code == 422
         assert robot.sent == []
+
+
+async def test_explicit_text_limit_never_creates_task(persisted_service, postgres_store):
+    service, robot = persisted_service
+    service.max_text_chars = 4
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(api_app(service)), base_url="http://test") as client:
+        result = await client.post("/api/robot-agent/tasks", json={"text": "too long"}, headers=HEADERS)
+        assert result.status_code == 422
+    assert await postgres_store.pool.fetchval("SELECT count(*) FROM ra_tasks") == 0
+    assert robot.sent == []
