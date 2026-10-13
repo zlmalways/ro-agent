@@ -92,7 +92,14 @@ class TaskService:
                 continue
             async with self.store.system_unit_of_work() as tx:
                 task = await tx.load_task(task.task_id, for_update=True)
+                binding = await tx.get_binding(task.customer_id, task.snapshot.robot_binding_id)
+                if binding is None or not binding["enabled"] or binding["isolation_reason"]:
+                    continue
                 change = self.executor.prepare(context, None, task)
+                if change.command:
+                    command = replace(change.command, dispatch_generation=binding["connection_generation"])
+                    change = replace(change, command=command,
+                                     task=replace(change.task, commands=change.task.commands[:-1] + (command,)))
                 if change.command is None or not await tx.claim_slot(deployment_id, change.task):
                     continue
                 await tx.apply_changes(replace(change, decisions=check.records))
@@ -116,10 +123,21 @@ class TaskService:
 
     async def on_robot_event(self, event):
         async with self.store.system_unit_of_work() as tx:
-            task = await tx.find_event_task(event)
-            if task is None or await tx.event_seen(event):
+            binding = await tx.get_binding(event.customer_id, event.robot_binding_id)
+            if binding is None:
                 return
-            change = self.executor.apply_event(task, event)
+            if event.connection_generation != binding["connection_generation"]:
+                await tx.record_diagnostic(binding, event.connection_generation, event.event_id,
+                                           {"cmd_id": event.cmd_id, "state": event.state, "reason": "STALE_CONNECTION"})
+                return
+            task = await tx.find_event_task(event)
+            if task is None:
+                await tx.record_diagnostic(binding, event.connection_generation, event.event_id,
+                                           {"cmd_id": event.cmd_id, "state": event.state, "reason": "UNKNOWN_COMMAND"})
+                return
+            if await tx.event_seen(event):
+                return
+            change = self.executor.apply_event(task, event, current_generation=binding["connection_generation"])
             if change.task == task:
                 return
             await tx.apply_changes(change)
@@ -127,6 +145,60 @@ class TaskService:
                                                                           "state": change.task.state}))
             if change.task.state in {"SUCCEEDED", "FAILED", "CANCELLED"}:
                 await tx.release_slot(task.task_id)
+
+    async def on_robot_connected(self, binding, frame):
+        async with self.store.system_unit_of_work() as tx:
+            stored = await tx.get_binding(binding["customer_id"], binding["binding_id"])
+            if stored is None or not stored["enabled"] or stored["wire_robot_id"] != frame["robot_id"]:
+                raise PermissionError("robot binding unavailable")
+            tasks = await tx.tasks_for_binding(binding)
+            generation = await tx.activate_binding(stored, frame)
+            await self._observe_busy(tx, stored, generation, frame, tasks)
+            return generation
+
+    async def _observe_busy(self, tx, binding, generation, frame, tasks):
+        command_id = frame.get("busy_cmd_id", "")
+        tracked = any(command.command_id == command_id and command.dispatch_state != "PREPARED"
+                      and command.outcome not in {"SUCCEEDED", "FAILED"} for task in tasks for command in task.commands)
+        has_active = any(command.dispatch_state != "PREPARED" and command.outcome not in {"SUCCEEDED", "FAILED"}
+                         for task in tasks for command in task.commands)
+        if (command_id and not tracked) or (frame.get("busy") is True and not has_active):
+            evidence_id = str(uuid4())
+            await tx.record_diagnostic(binding, generation, evidence_id, {"reason": "UNTRACKED_EXECUTION", "busy_cmd_id": command_id})
+            await tx.isolate_binding(binding, "UNTRACKED_EXECUTION", evidence_id)
+            for task in tasks:
+                if task.state not in {"SUCCEEDED", "FAILED", "CANCELLED"}:
+                    changed = replace(task, state="BLOCKED", reason_code="UNTRACKED_EXECUTION", version=task.version + 1)
+                    await tx.apply_changes(ChangeSet(changed))
+                    await tx.append_event(task.task_id, TaskEvent("binding_isolated", {"reason_code": "UNTRACKED_EXECUTION"}))
+
+    async def on_robot_observation(self, binding, generation, frame):
+        async with self.store.system_unit_of_work() as tx:
+            stored = await tx.get_binding(binding["customer_id"], binding["binding_id"])
+            if stored is None or stored["connection_generation"] != generation:
+                return
+            tasks = await tx.tasks_for_binding(binding)
+            await tx.update_observations(stored, generation, frame)
+            await self._observe_busy(tx, stored, generation, frame, tasks)
+
+    async def on_robot_disconnected(self, binding, generation):
+        async with self.store.system_unit_of_work() as tx:
+            await tx.update_observations(binding, generation, {"connected": False})
+
+    async def may_write(self, command):
+        async with self.store.system_unit_of_work() as tx:
+            try:
+                task = await tx.load_task(command.task_id, for_update=True)
+            except NotFoundError:
+                return False
+            if task.customer_id != command.customer_id:
+                return False
+            binding = await tx.get_binding(command.customer_id, command.robot_binding_id)
+            stored = next((item for item in task.commands if item.command_id == command.command_id), None)
+            return (binding is not None and binding["enabled"] and not binding["isolation_reason"]
+                    and binding["connection_generation"] == command.dispatch_generation
+                    and stored is not None and stored.dispatch_state == "DISPATCHING"
+                    and stored.outcome not in {"SUCCEEDED", "FAILED"} and task.state == "RUNNING")
 
     async def get(self, context, task_id):
         async with self.store.unit_of_work(context) as tx:

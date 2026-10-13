@@ -56,6 +56,15 @@ class MemoryTestStore:
         return next((deepcopy(task) for task in self.tasks.values() if task.customer_id == event.customer_id
                      and any(command.command_id == event.cmd_id for command in task.commands)), None)
 
+    async def get_binding(self, customer_id, binding_id):
+        if customer_id == "test-customer" and binding_id == "test-binding":
+            return {"customer_id": customer_id, "binding_id": binding_id, "enabled": True,
+                    "isolation_reason": "", "connection_generation": 1}
+        return None
+
+    async def record_diagnostic(self, binding, generation, event_id, frame):
+        pass
+
     async def list_tasks(self):
         return deepcopy(list(self.tasks.values()))
 

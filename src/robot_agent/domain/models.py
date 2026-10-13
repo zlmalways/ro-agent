@@ -151,6 +151,7 @@ class RobotEvent:
     cmd_id: str
     state: str
     received_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    details: Mapping[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)

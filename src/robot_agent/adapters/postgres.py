@@ -5,6 +5,7 @@ from dataclasses import asdict
 from hashlib import sha256
 import json
 from pathlib import Path
+from datetime import datetime, timezone
 
 from robot_agent.domain.models import (
     Command, ConflictError, ContextSnapshot, NotFoundError, Plan, PlanStep, Task,
@@ -200,7 +201,8 @@ class TaskTransaction:
             await self.connection.execute("""INSERT INTO ra_robot_events (customer_id,event_id,binding_id,
                 connection_generation,cmd_id,event_type,received_at,payload) VALUES ($1,$2,$3,$4,$5,'cmd_status',$6,$7::jsonb)
                 ON CONFLICT (customer_id,event_id) DO NOTHING""", event.customer_id, event.event_id,
-                event.robot_binding_id, event.connection_generation, event.cmd_id, event.received_at, _json({"state": event.state}))
+                event.robot_binding_id, event.connection_generation, event.cmd_id, event.received_at,
+                _json({"state": event.state, **dict(event.details)}))
         for decision in changes.decisions:
             await self.connection.execute("""INSERT INTO ra_decisions (customer_id,decision_id,task_id,plan_id,kind,result,
                 rule_or_policy_version,evidence_refs,detail) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb)""",
@@ -247,6 +249,54 @@ class SystemTaskTransaction(TaskTransaction):
             state='ACTIVE' WHERE deployment_id=$5""", task.customer_id, task.task_id, task.unit_id,
             task.snapshot.robot_binding_id, deployment_id)
         return True
+
+    async def get_binding(self, customer_id, binding_id):
+        row = await self.connection.fetchrow("SELECT * FROM ra_robot_bindings WHERE customer_id=$1 AND binding_id=$2",
+                                             customer_id, binding_id)
+        return dict(row) if row else None
+
+    async def activate_binding(self, binding, frame):
+        generation = binding["connection_generation"] + 1
+        observations = {key: {"value": value, "received_at": datetime.now(timezone.utc).isoformat(),
+                              "connection_generation": generation}
+                        for key, value in frame.items() if key not in {"type", "robot_id"}}
+        observations["connected"] = {"value": True, "connection_generation": generation,
+                                     "received_at": datetime.now(timezone.utc).isoformat()}
+        await self.connection.execute("""UPDATE ra_robot_bindings SET connection_generation=$1,observations=$2::jsonb,
+            version=version+1 WHERE customer_id=$3 AND binding_id=$4 AND version=$5""", generation, _json(observations),
+            binding["customer_id"], binding["binding_id"], binding["version"])
+        return generation
+
+    async def update_observations(self, binding, generation, frame):
+        stored = await self.get_binding(binding["customer_id"], binding["binding_id"])
+        if stored is None or stored["connection_generation"] != generation:
+            return
+        observations = json.loads(stored["observations"])
+        instant = datetime.now(timezone.utc).isoformat()
+        for key, value in frame.items():
+            if key not in {"type", "robot_id"}:
+                observations[key] = {"value": value, "received_at": instant, "connection_generation": generation}
+        await self.connection.execute("""UPDATE ra_robot_bindings SET observations=$1::jsonb,version=version+1
+            WHERE customer_id=$2 AND binding_id=$3 AND connection_generation=$4""", _json(observations),
+            binding["customer_id"], binding["binding_id"], generation)
+
+    async def isolate_binding(self, binding, reason, evidence_id):
+        await self.connection.execute("""UPDATE ra_robot_bindings SET isolation_reason=$1,
+            isolation_evidence_refs=array_append(isolation_evidence_refs,$2),version=version+1
+            WHERE customer_id=$3 AND binding_id=$4""", reason, evidence_id, binding["customer_id"], binding["binding_id"])
+
+    async def tasks_for_binding(self, binding):
+        rows = await self.connection.fetch("""SELECT t.task_id FROM ra_tasks t JOIN ra_units u
+            ON t.customer_id=u.customer_id AND t.task_id=u.task_id
+            WHERE u.customer_id=$1 AND u.binding_id=$2 ORDER BY t.task_id FOR UPDATE OF t""",
+            binding["customer_id"], binding["binding_id"])
+        return [await self.load_task(row["task_id"]) for row in rows]
+
+    async def record_diagnostic(self, binding, generation, event_id, frame):
+        await self.connection.execute("""INSERT INTO ra_robot_events (customer_id,event_id,binding_id,
+            connection_generation,event_type,received_at,payload) VALUES ($1,$2,$3,$4,'diagnostic',clock_timestamp(),$5::jsonb)
+            ON CONFLICT (customer_id,event_id) DO NOTHING""", binding["customer_id"], event_id, binding["binding_id"],
+            generation, _json(frame))
 
     async def release_slot(self, task_id):
         await self.connection.execute("""UPDATE ra_execution_guard SET customer_id=NULL,task_id=NULL,unit_id=NULL,

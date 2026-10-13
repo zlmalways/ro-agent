@@ -1,0 +1,1 @@
+"""HTTP/WebSocket presentation boundaries."""

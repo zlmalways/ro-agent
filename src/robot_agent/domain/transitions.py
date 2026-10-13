@@ -5,12 +5,13 @@ from dataclasses import replace
 from .models import ChangeSet, Command, RobotEvent, Task
 
 
-def check_transition(task: Task, command: Command | None, event: RobotEvent) -> ChangeSet:
+def check_transition(task: Task, command: Command | None, event: RobotEvent, *, current_generation=None) -> ChangeSet:
     if command is None or command.dispatch_state == "PREPARED":
         return ChangeSet(task)
     if event.customer_id != command.customer_id or event.robot_binding_id != command.robot_binding_id:
         return ChangeSet(task)
-    if event.connection_generation != task.snapshot.generation or event.cmd_id != command.command_id:
+    generation = task.snapshot.generation if current_generation is None else current_generation
+    if event.connection_generation != generation or event.cmd_id != command.command_id:
         return ChangeSet(task)
     if event.state not in {"pending", "running", "succeeded", "failed"}:
         return ChangeSet(task)

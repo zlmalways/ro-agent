@@ -25,6 +25,6 @@ class Executor:
                           task.snapshot.generation)
         return ChangeSet(replace(task, state="RUNNING", commands=task.commands + (command,), version=task.version + 1), command)
 
-    def apply_event(self, facts, event):
+    def apply_event(self, facts, event, *, current_generation=None):
         command = next((item for item in facts.commands if item.command_id == event.cmd_id), None)
-        return check_transition(facts, command, event)
+        return check_transition(facts, command, event, current_generation=current_generation)
