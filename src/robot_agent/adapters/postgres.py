@@ -130,7 +130,7 @@ class TaskTransaction:
         self.loaded_versions[task_id] = row["version"]
         return Task(task_id, row["customer_id"], row["actor_kind"], row["actor_id"], row["goal_text"], row["state"],
                     row["reason_code"], row["version"], plan, snapshot, row["unit_id"], commands,
-                    tuple(row["completed"]), row["clarification"], row["result_disputed"])
+                    tuple(row["completed"]), row["clarification"], row["result_disputed"], row["clarification_id"], tuple(row["answers"]))
 
     async def load_facts(self, task_id, *, for_update):
         return await self.load_task(task_id, for_update=for_update)
@@ -152,9 +152,9 @@ class TaskTransaction:
                     raise ConflictError("plan version is immutable")
             status = await self.connection.execute("""UPDATE ra_tasks SET state=$1,reason_code=$2,active_plan_id=$3,
                 completed=$4,clarification=$5,result_disputed=$6,version=$7,updated_at=clock_timestamp()
-                WHERE customer_id=$8 AND task_id=$9 AND version=$10""", task.state, task.reason_code,
+                ,clarification_id=$11,answers=$12 WHERE customer_id=$8 AND task_id=$9 AND version=$10""", task.state, task.reason_code,
                 task.plan.plan_id if task.plan else None, list(task.completed), task.clarification, task.result_disputed,
-                task.version, task.customer_id, task.task_id, expected)
+                task.version, task.customer_id, task.task_id, expected, task.clarification_id, list(task.answers))
             if status != "UPDATE 1":
                 raise ConflictError("task version changed")
             if task.plan:
@@ -249,6 +249,28 @@ class TaskTransaction:
         return [{"customer_id": row["customer_id"], "plan_id": row["plan_id"], "plan_revision": row["plan_revision"],
                  "scope": row["scope"], "policy_version": row["policy_version"], "issued_at": row["issued_at"],
                  "expires_at": row["expires_at"], "revoked_at": row["revoked_at"]} for row in rows]
+
+    async def get_input(self, context, key):
+        self._check_customer(context.customer_id, context.actor_id)
+        digest = sha256(_json([context.customer_id, context.actor_id, "audio", key]).encode()).digest()
+        await self.connection.execute("SELECT pg_advisory_xact_lock($1)", int.from_bytes(digest[:8], "big", signed=True))
+        row = await self.connection.fetchrow("SELECT * FROM ra_inputs WHERE customer_id=$1 AND actor_id=$2 AND operation='audio' AND key=$3",
+                                             context.customer_id, context.actor_id, key)
+        return dict(row) if row else None
+
+    async def insert_input(self, context, key, input_id, digest):
+        await self.connection.execute("""INSERT INTO ra_inputs (customer_id,actor_id,operation,key,input_id,request_digest,state)
+            VALUES ($1,$2,'audio',$3,$4,$5,'PROCESSING')""", context.customer_id, context.actor_id, key, input_id, digest)
+
+    async def finish_input(self, context, key, text, provider_ref, task_id=None):
+        await self.connection.execute("""UPDATE ra_inputs SET normalized_text=$1,provider_ref=$2,result_task_id=$3,
+            state=CASE WHEN $3::text IS NULL THEN 'TRANSCRIBED' ELSE 'COMPLETE' END
+            WHERE customer_id=$4 AND actor_id=$5 AND operation='audio' AND key=$6""",
+            text, provider_ref, task_id, context.customer_id, context.actor_id, key)
+
+    async def fail_input(self, context, key):
+        await self.connection.execute("UPDATE ra_inputs SET state='FAILED' WHERE customer_id=$1 AND actor_id=$2 AND operation='audio' AND key=$3",
+                                      context.customer_id, context.actor_id, key)
 
 
 class SystemTaskTransaction(TaskTransaction):

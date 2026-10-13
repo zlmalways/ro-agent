@@ -109,6 +109,9 @@ class TestRobot:
         self.sent.append(deepcopy(command))
         return SendObservation(True)
 
+    async def cancel(self, command):
+        return SendObservation(True)
+
 
 class TestResources:
     async def snapshot(self, context):
@@ -128,6 +131,9 @@ class TestPolicy:
 
     async def can_approve(self, context, task):
         return context.customer_id == task.customer_id
+
+    async def can_cancel(self, context, task):
+        return context.customer_id == task.customer_id and context.actor_id == task.actor_id
     def __init__(self, result):
         self.result = result
 

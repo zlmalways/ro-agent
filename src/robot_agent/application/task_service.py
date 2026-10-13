@@ -7,7 +7,7 @@ import json
 from uuid import uuid4
 
 from robot_agent.domain.models import (
-    ChangeSet, ConflictError, Decision, NotFoundError, Plan, PlanError, PreflightBlocked,
+    ChangeSet, ConflictError, Decision, DependencyUnavailable, NotFoundError, Plan, PlanError, PreflightBlocked,
     Task, TaskEvent, TaskView, TrustedContext,
 )
 
@@ -23,7 +23,9 @@ def task_view(task):
                            "robot_binding_id": command.robot_binding_id, "action": command.wire_skill,
                            "args": dict(command.wire_args), "dispatch_state": command.dispatch_state,
                            "outcome": command.outcome, "evidence_ids": command.evidence_ids}
-                          for command in task.commands))
+                          for command in task.commands), task.clarification_id,
+                    tuple({"step_id": step.step_id, "action": step.action, "args": dict(step.args), "depends_on": step.depends_on,
+                           "source_refs": step.source_refs} for step in task.plan.steps) if task.plan else ())
 
 
 class TaskService:
@@ -57,10 +59,11 @@ class TaskService:
             await tx.append_event(task.task_id, TaskEvent("received", {"state": task.state}))
         snapshot = await self.resources.snapshot(context)
         records = ()
+        provider_error = None
         try:
             candidate = await self.planner.plan(value.text, [], snapshot)
             if candidate.outcome == "clarify":
-                task = replace(task, state="NEEDS_CLARIFICATION", clarification=candidate.question)
+                task = replace(task, state="NEEDS_CLARIFICATION", clarification=candidate.question, clarification_id=str(uuid4()))
             elif candidate.outcome == "unsupported":
                 task = replace(task, state="FAILED", reason_code="UNSUPPORTED")
             else:
@@ -70,6 +73,9 @@ class TaskService:
                 task = replace(task, state=state, reason_code="" if state == "READY" else "AUTHORIZATION_" + check.authorization.upper(),
                                snapshot=snapshot, plan=Plan(str(uuid4()), 1, check.validation.steps, check.validation.snapshot_id))
                 records = check.records
+        except DependencyUnavailable as exc:
+            provider_error = exc
+            task = replace(task, state="BLOCKED", reason_code="PLANNER_UNAVAILABLE")
         except PreflightBlocked as exc:
             task = replace(task, state="BLOCKED", reason_code=str(exc))
         except PlanError:
@@ -81,7 +87,81 @@ class TaskService:
             task = replace(task, version=task.version + 1)
             await tx.apply_changes(ChangeSet(task, decisions=records))
             await tx.append_event(task.task_id, TaskEvent("planned", {"state": task.state, "reason_code": task.reason_code}))
+        if provider_error:
+            raise provider_error
         return task_view(task)
+
+    async def cancel(self, context, task_id, expected_version, request_key):
+        digest = sha256(json.dumps([task_id, expected_version]).encode()).hexdigest()
+        async with self.store.system_unit_of_work() as tx:
+            existing = await tx.get_request(context.customer_id, context.actor_id, request_key, "cancel")
+            task = await tx.load_task(task_id, for_update=True)
+            if task.customer_id != context.customer_id or task.actor_id != context.actor_id:
+                raise NotFoundError("object not found")
+            if existing:
+                if existing[0] != digest:
+                    raise ConflictError("request key content conflict")
+                return task_view(task)
+            if task.version != expected_version:
+                raise ConflictError("task version changed")
+            if not await self.policy.can_cancel(context, task):
+                raise PermissionError("CANCEL_POLICY_UNAVAILABLE")
+            if task.state in {"SUCCEEDED", "FAILED", "CANCELLED"}:
+                raise ConflictError("task already ended")
+            in_flight = next((command for command in task.commands if command.dispatch_state != "PREPARED"
+                             and command.outcome not in {"SUCCEEDED", "FAILED"}), None)
+            changed = replace(task, state="CANCEL_REQUESTED" if in_flight else "CANCELLED", version=task.version + 1)
+            await tx.apply_changes(ChangeSet(changed))
+            await tx.put_request(context.customer_id, context.actor_id, request_key, digest, task_id, "cancel")
+            await tx.append_event(task_id, TaskEvent("cancel_requested", {"state": changed.state}))
+            if not in_flight:
+                await tx.release_slot(task_id)
+        if in_flight:
+            await self.robot.cancel(in_flight)
+        return task_view(changed)
+
+    async def answer(self, context, task_id, clarification_id, answer, expected_version, request_key):
+        if not answer.strip() or not request_key:
+            raise PlanError("ANSWER_REQUIRED")
+        digest = sha256(json.dumps([task_id, clarification_id, answer, expected_version]).encode()).hexdigest()
+        async with self.store.unit_of_work(context) as tx:
+            existing = await tx.get_request(context.customer_id, context.actor_id, request_key, "answer")
+            if existing:
+                if existing[0] != digest:
+                    raise ConflictError("request key content conflict")
+                return task_view(await tx.load_task(existing[1]))
+            task = await tx.load_task(task_id)
+        if task.version != expected_version or task.state != "NEEDS_CLARIFICATION" or task.clarification_id != clarification_id:
+            raise ConflictError("clarification version changed")
+        snapshot = await self.resources.snapshot(context)
+        answers = task.answers + (answer,)
+        candidate = await self.planner.plan(task.goal_text, list(answers), snapshot)
+        records = ()
+        if candidate.outcome == "clarify":
+            changed = replace(task, clarification=candidate.question, clarification_id=str(uuid4()), answers=answers)
+        elif candidate.outcome == "unsupported":
+            changed = replace(task, state="FAILED", reason_code="UNSUPPORTED", answers=answers)
+        else:
+            check = await self.preflight.check(context, candidate, snapshot)
+            state = {"allow": "READY", "require_confirmation": "WAITING_APPROVAL", "deny": "FAILED", "unavailable": "BLOCKED"}[check.authorization]
+            changed = replace(task, state=state, reason_code="" if state == "READY" else "AUTHORIZATION_" + check.authorization.upper(),
+                              plan=Plan(str(uuid4()), task.plan.revision + 1 if task.plan else 1, check.validation.steps, snapshot.snapshot_id),
+                              snapshot=snapshot, clarification="", clarification_id="", answers=answers)
+            records = check.records
+        async with self.store.unit_of_work(context) as tx:
+            existing = await tx.get_request(context.customer_id, context.actor_id, request_key, "answer")
+            if existing:
+                if existing[0] != digest:
+                    raise ConflictError("request key content conflict")
+                return task_view(await tx.load_task(existing[1]))
+            current = await tx.load_task(task_id, for_update=True)
+            if current.version != expected_version:
+                raise ConflictError("task version changed")
+            changed = replace(changed, version=current.version + 1)
+            await tx.apply_changes(ChangeSet(changed, decisions=records))
+            await tx.put_request(context.customer_id, context.actor_id, request_key, digest, task_id, "answer")
+            await tx.append_event(task_id, TaskEvent("clarification_answered", {"state": changed.state}))
+        return task_view(changed)
 
     async def dispatch_next(self, deployment_id):
         if self.queue_policy is None or self.ownership is None or not await self.ownership.healthy():

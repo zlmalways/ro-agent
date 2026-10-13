@@ -206,6 +206,8 @@ class Task:
     completed: tuple[str, ...] = ()
     clarification: str = ""
     result_disputed: bool = False
+    clarification_id: str = ""
+    answers: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -226,3 +228,5 @@ class TaskView:
     clarification: str
     result_disputed: bool
     result_summary: tuple[dict, ...] = field(default_factory=tuple)
+    clarification_id: str = ""
+    plan_steps: tuple[dict, ...] = ()
