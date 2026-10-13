@@ -43,19 +43,21 @@ class PostgresStore:
             yield SystemTaskTransaction(connection, None, self.deployment_id)
 
     async def migrate(self):
-        migration = Path(__file__).resolve().parents[3] / "db/migrations/0001_robot_agent.sql"
-        sql = migration.read_text(encoding="utf-8")
-        checksum = sha256(sql.encode()).hexdigest()
+        migrations = Path(__file__).resolve().parents[3] / "db/migrations"
         async with self.pool.acquire() as connection, connection.transaction():
             await connection.execute("SELECT pg_advisory_xact_lock(719002601)")
             await connection.execute("""CREATE TABLE IF NOT EXISTS ra_schema_migrations
                                       (version integer PRIMARY KEY, checksum text NOT NULL)""")
-            installed = await connection.fetchval("SELECT checksum FROM ra_schema_migrations WHERE version=1")
-            if installed and installed != checksum:
-                raise ConflictError("installed migration checksum differs")
-            if not installed:
-                await connection.execute(sql)
-                await connection.execute("INSERT INTO ra_schema_migrations VALUES (1, $1)", checksum)
+            for migration in sorted(migrations.glob("*.sql")):
+                version = int(migration.name.split("_", 1)[0])
+                sql = migration.read_text(encoding="utf-8")
+                checksum = sha256(sql.encode()).hexdigest()
+                installed = await connection.fetchval("SELECT checksum FROM ra_schema_migrations WHERE version=$1", version)
+                if installed and installed != checksum:
+                    raise ConflictError("installed migration checksum differs")
+                if not installed:
+                    await connection.execute(sql)
+                    await connection.execute("INSERT INTO ra_schema_migrations VALUES ($1, $2)", version, checksum)
             await connection.execute("INSERT INTO ra_execution_guard (deployment_id) VALUES ($1) ON CONFLICT DO NOTHING",
                                      self.deployment_id)
 
@@ -123,7 +125,7 @@ class TaskTransaction:
         commands = tuple(Command(item["command_id"], item["task_id"], item["customer_id"], item["unit_id"],
                                  item["plan_id"], item["step_id"], item["binding_id"], item["wire_skill"],
                                  json.loads(item["wire_args"]), item["dispatch_generation"], item["dispatch_state"],
-                                 item["outcome"], item["evidence_conflict"], tuple(item["evidence_ids"])) for item in records)
+                                 item["outcome"], item["evidence_conflict"], tuple(item["evidence_ids"]), item["owner_run_id"]) for item in records)
         self.loaded_versions[task_id] = row["version"]
         return Task(task_id, row["customer_id"], row["actor_kind"], row["actor_id"], row["goal_text"], row["state"],
                     row["reason_code"], row["version"], plan, snapshot, row["unit_id"], commands,
@@ -177,22 +179,26 @@ class TaskTransaction:
         if original:
             immutable = {"task_id": command.task_id, "unit_id": command.unit_id, "plan_id": command.plan_id,
                          "step_id": command.step_id, "binding_id": command.robot_binding_id,
-                         "wire_skill": command.wire_skill, "dispatch_generation": command.dispatch_generation}
+                         "wire_skill": command.wire_skill}
             if any(original[key] != value for key, value in immutable.items()) or json.loads(original["wire_args"]) != dict(command.wire_args):
                 raise ConflictError("command wire content is immutable")
+            if (original["dispatch_generation"], original["owner_run_id"]) != (command.dispatch_generation, command.owner_run_id):
+                if original["dispatch_state"] != "PREPARED" or command.dispatch_state != "DISPATCHING":
+                    raise ConflictError("attempt ownership is immutable")
             await self.connection.execute("""UPDATE ra_commands SET dispatch_state=$1,outcome=$2,evidence_conflict=$3,
-                evidence_ids=$4,version=version+1,
+                evidence_ids=$4,version=version+1,dispatch_generation=$8,owner_run_id=$9,
                 sent_at=CASE WHEN $1='SENT' THEN coalesce(sent_at,clock_timestamp()) ELSE sent_at END,
                 finished_at=CASE WHEN $2 IN ('SUCCEEDED','FAILED') THEN coalesce(finished_at,clock_timestamp()) ELSE finished_at END
                 WHERE customer_id=$5 AND command_id=$6 AND version=$7""", command.dispatch_state, command.outcome,
-                command.evidence_conflict, list(command.evidence_ids), command.customer_id, command.command_id, original["version"])
+                command.evidence_conflict, list(command.evidence_ids), command.customer_id, command.command_id, original["version"],
+                command.dispatch_generation, command.owner_run_id)
         else:
             await self.connection.execute("""INSERT INTO ra_commands (customer_id,command_id,task_id,unit_id,plan_id,
-                binding_id,step_id,wire_skill,wire_args,dispatch_generation,dispatch_state,outcome,evidence_conflict,evidence_ids)
-                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,$10,$11,$12,$13,$14)""", command.customer_id,
+                binding_id,step_id,wire_skill,wire_args,dispatch_generation,dispatch_state,outcome,evidence_conflict,evidence_ids,owner_run_id)
+                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,$10,$11,$12,$13,$14,$15)""", command.customer_id,
                 command.command_id, command.task_id, command.unit_id, command.plan_id, command.robot_binding_id,
                 command.step_id, command.wire_skill, wire_json, command.dispatch_generation, command.dispatch_state,
-                command.outcome, command.evidence_conflict, list(command.evidence_ids))
+                command.outcome, command.evidence_conflict, list(command.evidence_ids), command.owner_run_id)
 
     async def apply_changes(self, changes):
         await self.save_task(changes.task)

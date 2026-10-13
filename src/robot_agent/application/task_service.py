@@ -12,6 +12,7 @@ from robot_agent.domain.models import (
 
 from .executor import Executor
 from .preflight import Preflight
+from robot_agent.domain.transitions import uncertain_execution
 
 
 def task_view(task):
@@ -25,7 +26,7 @@ def task_view(task):
 
 
 class TaskService:
-    def __init__(self, *, store, planner, robot, resources, policy, catalog):
+    def __init__(self, *, store, planner, robot, resources, policy, catalog, queue_policy=None, ownership=None):
         self.store = store
         self.planner = planner
         self.robot = robot
@@ -34,6 +35,8 @@ class TaskService:
         self.catalog = catalog
         self.preflight = Preflight(catalog, policy)
         self.executor = Executor()
+        self.queue_policy = queue_policy
+        self.ownership = ownership
 
     async def submit(self, context, value, request_key):
         if not value.text.strip() or not request_key:
@@ -78,10 +81,13 @@ class TaskService:
         return task_view(task)
 
     async def dispatch_next(self, deployment_id):
+        if self.queue_policy is None or self.ownership is None or not await self.ownership.healthy():
+            return
         async with self.store.system_unit_of_work() as tx:
             tasks = await tx.list_tasks()
-        for task in tasks:
-            if task.state not in {"READY", "RUNNING"}:
+        for task in self.queue_policy.order(tasks):
+            resuming_prepared = task.state == "BLOCKED" and task.reason_code == "REVALIDATION_REQUIRED"
+            if task.state not in {"READY", "QUEUED", "RUNNING"} and not resuming_prepared:
                 continue
             context = TrustedContext(task.customer_id, task.actor_kind, task.actor_id)
             snapshot = await self.resources.snapshot(context)
@@ -89,36 +95,76 @@ class TaskService:
                                                      for step in task.plan.steps))
             check = await self.preflight.check(context, candidate, snapshot, "dispatch")
             if check.authorization != "allow":
+                async with self.store.system_unit_of_work() as tx:
+                    current = await tx.load_task(task.task_id, for_update=True)
+                    if current.version != task.version:
+                        continue
+                    started = any(item.dispatch_state != "PREPARED" for item in current.commands)
+                    state = "WAITING_APPROVAL" if check.authorization == "require_confirmation" and not started else "BLOCKED"
+                    reason = "AUTHORIZATION_REQUIRED" if check.authorization == "require_confirmation" else "AUTHORIZATION_" + check.authorization.upper()
+                    await tx.apply_changes(ChangeSet(replace(current, state=state, reason_code=reason,
+                                                            version=current.version + 1), decisions=check.records))
+                    await tx.append_event(current.task_id, TaskEvent("dispatch_blocked", {"reason_code": reason}))
                 continue
             async with self.store.system_unit_of_work() as tx:
                 task = await tx.load_task(task.task_id, for_update=True)
                 binding = await tx.get_binding(task.customer_id, task.snapshot.robot_binding_id)
                 if binding is None or not binding["enabled"] or binding["isolation_reason"]:
                     continue
-                change = self.executor.prepare(context, None, task)
+                prepared = next((item for item in task.commands if item.dispatch_state == "PREPARED"), None)
+                if resuming_prepared and prepared:
+                    change = ChangeSet(replace(task, state="RUNNING", reason_code="", version=task.version + 1), prepared)
+                else:
+                    change = self.executor.prepare(context, None, task)
                 if change.command:
-                    command = replace(change.command, dispatch_generation=binding["connection_generation"])
-                    change = replace(change, command=command,
-                                     task=replace(change.task, commands=change.task.commands[:-1] + (command,)))
+                    if not prepared:
+                        command = replace(change.command, dispatch_generation=binding["connection_generation"],
+                                          owner_run_id=self.ownership.run_id)
+                        change = replace(change, command=command,
+                                         task=replace(change.task, commands=change.task.commands[:-1] + (command,)))
                 if change.command is None or not await tx.claim_slot(deployment_id, change.task):
                     continue
                 await tx.apply_changes(replace(change, decisions=check.records))
                 await tx.append_event(task.task_id, TaskEvent("command_prepared", {"command_id": change.command.command_id}))
-            command = replace(change.command, dispatch_state="DISPATCHING")
+            # Renew checks after PREPARED is committed; external dependencies never wait inside the DB transaction.
+            snapshot = await self.resources.snapshot(context)
+            check = await self.preflight.check(context, candidate, snapshot, "dispatch")
             async with self.store.system_unit_of_work() as tx:
                 task = await tx.load_task(task.task_id, for_update=True)
+                binding = await tx.get_binding(task.customer_id, task.snapshot.robot_binding_id)
+                if check.authorization != "allow" or not binding or not binding["enabled"] or binding["isolation_reason"]:
+                    reason = "AUTHORIZATION_" + check.authorization.upper() if check.authorization != "allow" else "BINDING_ISOLATED"
+                    await tx.apply_changes(ChangeSet(replace(task, state="BLOCKED", reason_code=reason,
+                                                            version=task.version + 1), decisions=check.records))
+                    await tx.append_event(task.task_id, TaskEvent("dispatch_blocked", {"reason_code": reason}))
+                    return
+                if task.state != "RUNNING" or task.result_disputed or not await self.ownership.healthy():
+                    return
+                stored = next(item for item in task.commands if item.command_id == change.command.command_id)
+                if stored.dispatch_state != "PREPARED":
+                    return
+                command = replace(stored, dispatch_state="DISPATCHING", dispatch_generation=binding["connection_generation"],
+                                  owner_run_id=self.ownership.run_id)
                 task = replace(task, commands=tuple(command if item.command_id == command.command_id else item for item in task.commands),
                                version=task.version + 1)
-                await tx.apply_changes(ChangeSet(task, command))
+                await tx.apply_changes(ChangeSet(task, command, decisions=check.records))
                 await tx.append_event(task.task_id, TaskEvent("dispatching", {"command_id": command.command_id}))
-            observation = await self.robot.send(command)
+            try:
+                observation = await self.robot.send(command) if await self.ownership.healthy() else None
+            except (OSError, RuntimeError):
+                observation = None
             async with self.store.system_unit_of_work() as tx:
                 task = await tx.load_task(task.task_id, for_update=True)
-                commands = tuple(replace(item, dispatch_state="SENT") if item.command_id == command.command_id and observation.sent else item
+                commands = tuple(replace(item, dispatch_state="SENT") if item.command_id == command.command_id and observation and observation.sent else item
                                  for item in task.commands)
                 if commands != task.commands:
                     await tx.apply_changes(ChangeSet(replace(task, commands=commands, version=task.version + 1)))
                     await tx.append_event(task.task_id, TaskEvent("send_observed", {"command_id": command.command_id}))
+                elif not observation or not observation.sent:
+                    change = uncertain_execution(task)
+                    if change.task != task:
+                        await tx.apply_changes(change)
+                        await tx.append_event(task.task_id, TaskEvent("result_unknown", {"command_id": command.command_id}))
             return
 
     async def on_robot_event(self, event):
@@ -130,7 +176,8 @@ class TaskService:
                 await tx.record_diagnostic(binding, event.connection_generation, event.event_id,
                                            {"cmd_id": event.cmd_id, "state": event.state, "reason": "STALE_CONNECTION"})
                 return
-            task = await tx.find_event_task(event)
+            related = await tx.tasks_for_binding(binding)
+            task = next((task for task in related if any(command.command_id == event.cmd_id for command in task.commands)), None)
             if task is None:
                 await tx.record_diagnostic(binding, event.connection_generation, event.event_id,
                                            {"cmd_id": event.cmd_id, "state": event.state, "reason": "UNKNOWN_COMMAND"})
@@ -143,6 +190,14 @@ class TaskService:
             await tx.apply_changes(change)
             await tx.append_event(task.task_id, TaskEvent("robot_feedback", {"command_id": event.cmd_id,
                                                                           "state": change.task.state}))
+            if change.command and change.command.evidence_conflict:
+                await tx.isolate_binding(binding, "EVIDENCE_CONFLICT", event.event_id)
+                for other in related:
+                    if other.task_id != task.task_id and other.state not in {"SUCCEEDED", "FAILED", "CANCELLED"}:
+                        blocked = replace(other, state="BLOCKED", reason_code="EVIDENCE_CONFLICT",
+                                          result_disputed=True, version=other.version + 1)
+                        await tx.apply_changes(ChangeSet(blocked))
+                        await tx.append_event(other.task_id, TaskEvent("binding_isolated", {"reason_code": "EVIDENCE_CONFLICT"}))
             if change.task.state in {"SUCCEEDED", "FAILED", "CANCELLED"}:
                 await tx.release_slot(task.task_id)
 
@@ -183,9 +238,33 @@ class TaskService:
 
     async def on_robot_disconnected(self, binding, generation):
         async with self.store.system_unit_of_work() as tx:
+            stored = await tx.get_binding(binding["customer_id"], binding["binding_id"])
+            if stored is None or stored["connection_generation"] != generation:
+                return
+            for task in await tx.tasks_for_binding(binding):
+                change = uncertain_execution(task)
+                if change.task != task:
+                    await tx.apply_changes(change)
+                    await tx.append_event(task.task_id, TaskEvent("result_unknown", {"reason_code": "RESULT_UNKNOWN"}))
             await tx.update_observations(binding, generation, {"connected": False})
 
+    async def recover(self, deployment_id):
+        if self.ownership is None or not await self.ownership.healthy():
+            return
+        async with self.store.system_unit_of_work() as tx:
+            tasks = await tx.list_tasks()
+            for original in sorted(tasks, key=lambda value: value.task_id):
+                task = await tx.load_task(original.task_id, for_update=True)
+                if task.state in {"SUCCEEDED", "FAILED", "CANCELLED"}:
+                    continue
+                change = self.executor.reconcile(task)
+                if change.task != task:
+                    await tx.apply_changes(change)
+                    await tx.append_event(task.task_id, TaskEvent("reconciled", {"reason_code": change.task.reason_code}))
+
     async def may_write(self, command):
+        if self.ownership is None or not await self.ownership.healthy() or command.owner_run_id != self.ownership.run_id:
+            return False
         async with self.store.system_unit_of_work() as tx:
             try:
                 task = await tx.load_task(command.task_id, for_update=True)

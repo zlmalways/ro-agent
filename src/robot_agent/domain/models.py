@@ -140,6 +140,7 @@ class Command:
     outcome: str = "NONE"
     evidence_conflict: bool = False
     evidence_ids: tuple[str, ...] = ()
+    owner_run_id: str = ""
 
 
 @dataclass(frozen=True)

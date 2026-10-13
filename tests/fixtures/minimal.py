@@ -65,6 +65,10 @@ class MemoryTestStore:
     async def record_diagnostic(self, binding, generation, event_id, frame):
         pass
 
+    async def tasks_for_binding(self, binding):
+        return [deepcopy(task) for task in self.tasks.values() if task.customer_id == binding["customer_id"]
+                and task.snapshot is not None and task.snapshot.robot_binding_id == binding["binding_id"]]
+
     async def list_tasks(self):
         return deepcopy(list(self.tasks.values()))
 
@@ -123,6 +127,20 @@ class TestPolicy:
         return self.result
 
 
+class TestQueuePolicy:
+    """Fixture-only ordering; not a product-policy default."""
+
+    def order(self, tasks):
+        return list(tasks)
+
+
+class TestOwnership:
+    run_id = "test-owner-run"
+
+    async def healthy(self):
+        return True
+
+
 def build_service(plan=None, policy_result="allow"):
     if plan is None:
         plan = {"outcome": "plan", "steps": [
@@ -134,5 +152,6 @@ def build_service(plan=None, policy_result="allow"):
         store=store, planner=TestPlanner(plan), robot=robot, resources=TestResources(),
         policy=TestPolicy(policy_result),
         catalog=ActionCatalog({"move_to": ("location",), "vla_skill": ("skill_id",)}),
+        queue_policy=TestQueuePolicy(), ownership=TestOwnership(),
     )
     return service, robot, store

@@ -4,7 +4,7 @@ from dataclasses import replace
 from uuid import uuid4
 
 from robot_agent.domain.models import ChangeSet, Command
-from robot_agent.domain.transitions import check_transition
+from robot_agent.domain.transitions import check_transition, uncertain_execution
 
 
 class Executor:
@@ -28,3 +28,11 @@ class Executor:
     def apply_event(self, facts, event, *, current_generation=None):
         command = next((item for item in facts.commands if item.command_id == event.cmd_id), None)
         return check_transition(facts, command, event, current_generation=current_generation)
+
+    def reconcile(self, facts):
+        change = uncertain_execution(facts)
+        if change.task != facts:
+            return change
+        if any(command.dispatch_state == "PREPARED" for command in facts.commands) and facts.reason_code != "REVALIDATION_REQUIRED":
+            return ChangeSet(replace(facts, state="BLOCKED", reason_code="REVALIDATION_REQUIRED", version=facts.version + 1))
+        return change

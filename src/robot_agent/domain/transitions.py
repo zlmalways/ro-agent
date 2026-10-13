@@ -25,14 +25,34 @@ def check_transition(task: Task, command: Command | None, event: RobotEvent, *, 
         else:
             return ChangeSet(task)
     else:
+        if command.outcome == "RESULT_UNKNOWN" and outcome in {"NONE", "RUNNING"}:
+            return ChangeSet(task)
         if command.outcome == "RUNNING" and outcome == "NONE":
             return ChangeSet(task)
         changed = replace(command, outcome=outcome, evidence_ids=command.evidence_ids + (event.event_id,))
         if outcome == "SUCCEEDED":
             completed = task.completed + (command.step_id,)
             state = "SUCCEEDED" if len(completed) == len(task.plan.steps) else task.state
-            task = replace(task, completed=completed, state=state)
+            reason = task.reason_code
+            if reason == "RESULT_UNKNOWN":
+                state, reason = ("SUCCEEDED" if len(completed) == len(task.plan.steps) else "RUNNING"), ""
+            if task.state == "CANCEL_REQUESTED":
+                state = "CANCELLED"
+            elif task.state == "BLOCKED" and reason and reason != "RESULT_UNKNOWN":
+                state = "BLOCKED"
+            task = replace(task, completed=completed, state=state, reason_code=reason)
         elif outcome == "FAILED":
             task = replace(task, state="BLOCKED", reason_code="ACTION_FAILED")
     commands = tuple(changed if item.command_id == command.command_id else item for item in task.commands)
     return ChangeSet(replace(task, commands=commands, version=task.version + 1), changed, event)
+
+
+def uncertain_execution(task: Task) -> ChangeSet:
+    changed = tuple(replace(command, outcome="RESULT_UNKNOWN")
+                    if command.dispatch_state in {"DISPATCHING", "SENT"} and command.outcome in {"NONE", "RUNNING"}
+                    else command for command in task.commands)
+    if changed == task.commands:
+        return ChangeSet(task)
+    # Preserve independent isolation/authorization reasons; uncertainty still stays on the command.
+    reason = task.reason_code if task.reason_code and task.reason_code != "RESULT_UNKNOWN" else "RESULT_UNKNOWN"
+    return ChangeSet(replace(task, commands=changed, state="BLOCKED", reason_code=reason, version=task.version + 1))
