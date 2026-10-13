@@ -11,6 +11,7 @@ from robot_agent.adapters.identity import ConfiguredIdentity
 from robot_agent.api.resources import router as resources_router
 from robot_agent.api.robot_ws import router as robot_router
 from robot_agent.api.tasks import router as tasks_router
+from robot_agent.api.voice import router as voice_router
 from robot_agent.domain.models import DependencyUnavailable, PreflightBlocked
 
 
@@ -30,6 +31,7 @@ def create_app(*, service=None, identity=None, resources=None, inputs=None):
     app.include_router(tasks_router)
     app.include_router(resources_router)
     app.include_router(robot_router)
+    app.include_router(voice_router)
     client_dir = Path(__file__).resolve().parents[2] / "client"
     if not client_dir.is_dir():
         client_dir = Path(sys.prefix) / "share/ro-agent/client"

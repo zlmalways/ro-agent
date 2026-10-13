@@ -325,6 +325,7 @@ class TaskService:
                         await tx.append_event(other.task_id, TaskEvent("binding_isolated", {"reason_code": "EVIDENCE_CONFLICT"}))
             if change.task.state in {"SUCCEEDED", "FAILED", "CANCELLED"}:
                 await tx.release_slot(task.task_id)
+        return task_view(change.task)
 
     async def _block_current(self, original, reason):
         async with self.store.system_unit_of_work() as tx:

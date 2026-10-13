@@ -22,9 +22,10 @@ class ConfiguredIdentity:
         if not self.robots:
             raise DependencyUnavailable("IDENTITY_UNAVAILABLE")
         record = next((row for secret, row in self.robots.items() if token and compare_digest(secret, token)), None)
-        if record is None or robot_id != record["wire_robot_id"]:
+        if record is None or robot_id not in {record["wire_robot_id"], record.get("voice_wire_robot_id")}:
             raise PermissionError("UNAUTHENTICATED")
-        return dict(record)
+        return {**record, "channel": "voice" if robot_id == record.get("voice_wire_robot_id") else "command",
+                "wire_robot_id": robot_id}
 
     def current_actor(self, context):
         if context.actor_kind == "user":

@@ -23,6 +23,7 @@ class Dlv0Robot:
         self.max_frame_bytes = max_frame_bytes
         self.sessions = {}
         self.write_lock = asyncio.Lock()
+        self.on_result = None
 
     def _bounded_frame(self, frame):
         if len(json.dumps(frame).encode()) > self.max_frame_bytes:
@@ -47,7 +48,9 @@ class Dlv0Robot:
         if frame["type"] == "cmd_status":
             event = RobotEvent(str(uuid4()), key[0], key[1], session.generation, frame["cmd_id"], frame["state"],
                                details={field: frame[field] for field in ("detail", "error_code") if field in frame})
-            await self.service.on_robot_event(event)
+            view = await self.service.on_robot_event(event)
+            if view and self.on_result:
+                await self.on_result(key[0], key[1], view)
         elif frame["type"] in {"readiness", "telemetry"}:
             await self.service.on_robot_observation(session.binding, session.generation, frame)
         elif frame["type"] == "hello":
