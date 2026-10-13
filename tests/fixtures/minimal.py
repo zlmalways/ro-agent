@@ -72,11 +72,15 @@ class MemoryTestStore:
     async def list_tasks(self):
         return deepcopy(list(self.tasks.values()))
 
-    async def get_request(self, customer_id, actor_id, key):
-        return self.request_keys.get((customer_id, actor_id, key))
+    async def get_request(self, customer_id, actor_id, key, operation="submit"):
+        return self.request_keys.get((customer_id, actor_id, operation, key))
 
-    async def put_request(self, customer_id, actor_id, key, digest, task_id):
-        self.request_keys[customer_id, actor_id, key] = (digest, task_id)
+    async def put_request(self, customer_id, actor_id, key, digest, task_id, operation="submit"):
+        self.request_keys[customer_id, actor_id, operation, key] = (digest, task_id)
+
+    async def approvals(self, task):
+        return [dict(decision.detail) for decision in self.decisions if decision.kind == "approval"
+                and decision.detail["plan_id"] == task.plan.plan_id]
 
     async def claim_slot(self, deployment_id, task):
         if self.slot not in (None, task.task_id):
@@ -120,6 +124,10 @@ class TestResources:
 
 class TestPolicy:
     version = "test-policy:v1"
+    approval_ttl_seconds = 300
+
+    async def can_approve(self, context, task):
+        return context.customer_id == task.customer_id
     def __init__(self, result):
         self.result = result
 

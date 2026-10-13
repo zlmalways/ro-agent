@@ -14,7 +14,8 @@ from robot_agent.domain.models import (
 
 def _json(value):
     return json.dumps(value, sort_keys=True, separators=(",", ":"),
-                      default=lambda item: sorted(item) if isinstance(item, (set, frozenset)) else item)
+                      default=lambda item: item.isoformat() if isinstance(item, datetime)
+                      else sorted(item) if isinstance(item, (set, frozenset)) else item)
 
 
 def _snapshot(value):
@@ -210,6 +211,16 @@ class TaskTransaction:
                 event.robot_binding_id, event.connection_generation, event.cmd_id, event.received_at,
                 _json({"state": event.state, **dict(event.details)}))
         for decision in changes.decisions:
+            if decision.kind == "approval":
+                detail = decision.detail
+                await self.connection.execute("""INSERT INTO ra_decisions (customer_id,decision_id,task_id,plan_id,kind,result,
+                    rule_or_policy_version,evidence_refs,detail,plan_revision,scope,approver_id,policy_version,issued_at,expires_at)
+                    VALUES ($1,$2,$3,$4,'approval',$5,$6,$7,$8::jsonb,$9,$10,$11,$12,$13,$14)""",
+                    changes.task.customer_id, decision.decision_id, changes.task.task_id, changes.task.plan.plan_id,
+                    decision.result, decision.rule_or_policy_version, list(decision.evidence_refs), _json(dict(detail)),
+                    detail["plan_revision"], list(detail["scope"]), detail["approver_id"], detail["policy_version"],
+                    detail["issued_at"], detail["expires_at"])
+                continue
             await self.connection.execute("""INSERT INTO ra_decisions (customer_id,decision_id,task_id,plan_id,kind,result,
                 rule_or_policy_version,evidence_refs,detail) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb)""",
                 changes.task.customer_id, decision.decision_id, changes.task.task_id,
@@ -231,6 +242,13 @@ class TaskTransaction:
         await self.connection.execute("""INSERT INTO ra_task_events (customer_id,task_id,seq,task_version,event_type,public_payload)
             SELECT $1,$2,coalesce(max(seq),0)+1,$3,$4,$5::jsonb FROM ra_task_events WHERE customer_id=$1 AND task_id=$2""",
             task.customer_id, task_id, task.version, value.event_type, _json(dict(value.public_payload)))
+
+    async def approvals(self, task):
+        rows = await self.connection.fetch("""SELECT * FROM ra_decisions WHERE customer_id=$1 AND task_id=$2
+            AND plan_id=$3 AND kind='approval' AND result='approve'""", task.customer_id, task.task_id, task.plan.plan_id)
+        return [{"customer_id": row["customer_id"], "plan_id": row["plan_id"], "plan_revision": row["plan_revision"],
+                 "scope": row["scope"], "policy_version": row["policy_version"], "issued_at": row["issued_at"],
+                 "expires_at": row["expires_at"], "revoked_at": row["revoked_at"]} for row in rows]
 
 
 class SystemTaskTransaction(TaskTransaction):
@@ -260,6 +278,29 @@ class SystemTaskTransaction(TaskTransaction):
         row = await self.connection.fetchrow("SELECT * FROM ra_robot_bindings WHERE customer_id=$1 AND binding_id=$2",
                                              customer_id, binding_id)
         return dict(row) if row else None
+
+    async def customer_bindings(self, customer_id):
+        rows = await self.connection.fetch("SELECT * FROM ra_robot_bindings WHERE customer_id=$1 AND enabled=true ORDER BY binding_id",
+                                           customer_id)
+        return [dict(row) for row in rows]
+
+    async def put_resource(self, context, binding_id, kind, entries, source_refs):
+        revision = await self.connection.fetchval("SELECT coalesce(max(revision),0)+1 FROM ra_resource_versions"
+                                                   " WHERE customer_id=$1 AND resource_id=$2 AND kind=$3",
+                                                   context.customer_id, binding_id, kind)
+        await self.connection.execute("""INSERT INTO ra_resource_versions
+            (customer_id,kind,resource_id,revision,payload,source_refs,created_by) VALUES ($1,$2,$3,$4,$5::jsonb,$6,$7)""",
+            context.customer_id, kind, binding_id, revision, _json(entries), list(source_refs), context.actor_id)
+        await self.connection.execute("""INSERT INTO ra_resource_heads (customer_id,binding_id,kind,revision)
+            VALUES ($1,$2,$3,$4) ON CONFLICT (customer_id,binding_id,kind) DO UPDATE SET revision=EXCLUDED.revision""",
+            context.customer_id, binding_id, kind, revision)
+        return {"binding_id": binding_id, "kind": kind, "revision": revision, "entries": dict(entries)}
+
+    async def current_resource(self, customer_id, binding_id, kind):
+        row = await self.connection.fetchrow("""SELECT v.* FROM ra_resource_versions v JOIN ra_resource_heads h
+            ON v.customer_id=h.customer_id AND v.resource_id=h.binding_id AND v.kind=h.kind AND v.revision=h.revision
+            WHERE h.customer_id=$1 AND h.binding_id=$2 AND h.kind=$3""", customer_id, binding_id, kind)
+        return {"revision": row["revision"], "entries": json.loads(row["payload"])} if row else None
 
     async def activate_binding(self, binding, frame):
         generation = binding["connection_generation"] + 1

@@ -17,11 +17,21 @@ class NotFoundError(LookupError):
     pass
 
 
+class DependencyUnavailable(RuntimeError):
+    pass
+
+
+class PreflightBlocked(ValueError):
+    pass
+
+
 @dataclass(frozen=True)
 class TrustedContext:
     customer_id: str
     actor_kind: str
     actor_id: str
+    roles: frozenset[str] = frozenset()
+    authentication_ref: str = ""
 
 
 @dataclass(frozen=True)
@@ -94,6 +104,9 @@ class ContextSnapshot:
     readiness: Mapping[str, Any]
     snapshot_id: str
     allowed_actions: frozenset[str]
+    readiness_evidence: Mapping[str, Any] = field(default_factory=dict)
+    capability_labels: Mapping[str, str] = field(default_factory=dict)
+    environment_labels: Mapping[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)

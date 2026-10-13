@@ -1,12 +1,13 @@
 """One task-write boundary: external effects run only after stored dispatch facts."""
 
 from dataclasses import replace
+from datetime import datetime, timedelta, timezone
 from hashlib import sha256
 import json
 from uuid import uuid4
 
 from robot_agent.domain.models import (
-    CandidatePlan, CandidateStep, ChangeSet, ConflictError, NotFoundError, Plan, PlanError,
+    ChangeSet, ConflictError, Decision, NotFoundError, Plan, PlanError, PreflightBlocked,
     Task, TaskEvent, TaskView, TrustedContext,
 )
 
@@ -69,6 +70,8 @@ class TaskService:
                 task = replace(task, state=state, reason_code="" if state == "READY" else "AUTHORIZATION_" + check.authorization.upper(),
                                snapshot=snapshot, plan=Plan(str(uuid4()), 1, check.validation.steps, check.validation.snapshot_id))
                 records = check.records
+        except PreflightBlocked as exc:
+            task = replace(task, state="BLOCKED", reason_code=str(exc))
         except PlanError:
             task = replace(task, state="FAILED", reason_code="PLAN_INVALID")
         async with self.store.unit_of_work(context) as tx:
@@ -90,10 +93,14 @@ class TaskService:
             if task.state not in {"READY", "QUEUED", "RUNNING"} and not resuming_prepared:
                 continue
             context = TrustedContext(task.customer_id, task.actor_kind, task.actor_id)
+            async with self.store.system_unit_of_work() as tx:
+                approvals = await tx.approvals(task)
             snapshot = await self.resources.snapshot(context)
-            candidate = CandidatePlan("plan", tuple(CandidateStep(step.step_id, step.action, dict(step.args), step.depends_on)
-                                                     for step in task.plan.steps))
-            check = await self.preflight.check(context, candidate, snapshot, "dispatch")
+            try:
+                check = await self.preflight.check(context, task.plan, snapshot, "dispatch", approvals)
+            except (PlanError, PreflightBlocked) as exc:
+                await self._block_current(task, str(exc))
+                continue
             if check.authorization != "allow":
                 async with self.store.system_unit_of_work() as tx:
                     current = await tx.load_task(task.task_id, for_update=True)
@@ -128,7 +135,13 @@ class TaskService:
                 await tx.append_event(task.task_id, TaskEvent("command_prepared", {"command_id": change.command.command_id}))
             # Renew checks after PREPARED is committed; external dependencies never wait inside the DB transaction.
             snapshot = await self.resources.snapshot(context)
-            check = await self.preflight.check(context, candidate, snapshot, "dispatch")
+            async with self.store.system_unit_of_work() as tx:
+                approvals = await tx.approvals(task)
+            try:
+                check = await self.preflight.check(context, task.plan, snapshot, "dispatch", approvals)
+            except (PlanError, PreflightBlocked) as exc:
+                await self._block_current(task, str(exc))
+                return
             async with self.store.system_unit_of_work() as tx:
                 task = await tx.load_task(task.task_id, for_update=True)
                 binding = await tx.get_binding(task.customer_id, task.snapshot.robot_binding_id)
@@ -200,6 +213,67 @@ class TaskService:
                         await tx.append_event(other.task_id, TaskEvent("binding_isolated", {"reason_code": "EVIDENCE_CONFLICT"}))
             if change.task.state in {"SUCCEEDED", "FAILED", "CANCELLED"}:
                 await tx.release_slot(task.task_id)
+
+    async def _block_current(self, original, reason):
+        async with self.store.system_unit_of_work() as tx:
+            task = await tx.load_task(original.task_id, for_update=True)
+            if task.version != original.version:
+                return
+            await tx.apply_changes(ChangeSet(replace(task, state="BLOCKED", reason_code=reason, version=task.version + 1)))
+            await tx.append_event(task.task_id, TaskEvent("blocked", {"reason_code": reason}))
+
+    async def decide(self, context, task_id, expected_version, decision, request_key):
+        if decision not in {"approve", "reject"}:
+            raise PlanError("invalid approval decision")
+        digest = sha256(json.dumps([task_id, expected_version, decision]).encode()).hexdigest()
+        async with self.store.system_unit_of_work() as tx:
+            existing = await tx.get_request(context.customer_id, context.actor_id, request_key, "decide")
+            if existing:
+                if existing[0] != digest:
+                    raise ConflictError("request key content conflict")
+                return task_view(await tx.load_task(existing[1]))
+            task = await tx.load_task(task_id)
+            approvals = await tx.approvals(task) if task.plan else []
+        if task.customer_id != context.customer_id:
+            raise NotFoundError("object not found")
+        if not await self.policy.can_approve(context, task):
+            raise PermissionError("APPROVAL_DENIED")
+        if task.version != expected_version:
+            raise ConflictError("task version changed")
+        if task.plan is None or task.state not in {"WAITING_APPROVAL", "BLOCKED"} \
+                or task.reason_code in {"RESULT_UNKNOWN", "EVIDENCE_CONFLICT", "UNTRACKED_EXECUTION"}:
+            raise ConflictError("task does not await approval")
+        records = ()
+        if decision == "approve":
+            ttl = getattr(self.policy, "approval_ttl_seconds", None)
+            if ttl is None or ttl <= 0 or not self.policy.version:
+                raise PreflightBlocked("APPROVAL_VALIDITY_UNAVAILABLE")
+            now = datetime.now(timezone.utc)
+            evidence = {"customer_id": task.customer_id, "plan_id": task.plan.plan_id, "plan_revision": task.plan.revision,
+                        "scope": tuple(step.step_id for step in task.plan.steps), "approver_id": context.actor_id,
+                        "policy_version": self.policy.version, "issued_at": now, "expires_at": now + timedelta(seconds=ttl),
+                        "revoked_at": None}
+            snapshot = await self.resources.snapshot(context)
+            check = await self.preflight.check(context, task.plan, snapshot, "approval", approvals + [evidence])
+            state = "READY" if check.authorization == "allow" else "BLOCKED"
+            reason = "" if state == "READY" else "AUTHORIZATION_" + check.authorization.upper()
+            records = check.records + (Decision(str(uuid4()), "approval", "approve", self.policy.version, detail=evidence),)
+        else:
+            state, reason = "FAILED", "APPROVAL_REJECTED"
+        async with self.store.system_unit_of_work() as tx:
+            existing = await tx.get_request(context.customer_id, context.actor_id, request_key, "decide")
+            if existing:
+                if existing[0] != digest:
+                    raise ConflictError("request key content conflict")
+                return task_view(await tx.load_task(existing[1]))
+            current = await tx.load_task(task_id, for_update=True)
+            if current.version != expected_version:
+                raise ConflictError("task version changed")
+            changed = replace(current, state=state, reason_code=reason, version=current.version + 1)
+            await tx.apply_changes(ChangeSet(changed, decisions=records))
+            await tx.put_request(context.customer_id, context.actor_id, request_key, digest, task_id, "decide")
+            await tx.append_event(task_id, TaskEvent("decision", {"decision": decision, "state": state}))
+        return task_view(changed)
 
     async def on_robot_connected(self, binding, frame):
         async with self.store.system_unit_of_work() as tx:
