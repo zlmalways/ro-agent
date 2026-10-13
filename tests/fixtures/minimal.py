@@ -2,6 +2,7 @@
 
 from contextlib import asynccontextmanager
 from copy import deepcopy
+import asyncio
 
 from robot_agent.application.task_service import TaskService
 from robot_agent.domain.models import ActionCatalog, CandidatePlan, ContextSnapshot, SendObservation
@@ -12,24 +13,48 @@ class MemoryTestStore:
         self.tasks = {}
         self.request_keys = {}
         self.slot = None
+        self.events = []
+        self.decisions = []
+        self.robot_events = {}
+        self.lock = asyncio.Lock()
 
     @asynccontextmanager
     async def unit_of_work(self, context):
-        backup = deepcopy((self.tasks, self.request_keys, self.slot))
-        try:
-            yield self
-        except BaseException:
-            self.tasks, self.request_keys, self.slot = backup
-            raise
+        async with self.lock:
+            backup = deepcopy((self.tasks, self.request_keys, self.slot, self.events, self.decisions, self.robot_events))
+            try:
+                yield self
+            except BaseException:
+                self.tasks, self.request_keys, self.slot, self.events, self.decisions, self.robot_events = backup
+                raise
+
+    def system_unit_of_work(self):
+        return self.unit_of_work(None)
 
     async def insert_task(self, task):
         self.tasks[task.task_id] = deepcopy(task)
 
-    async def load_task(self, task_id):
+    async def load_task(self, task_id, *, for_update=False):
         return deepcopy(self.tasks[task_id])
 
     async def save_task(self, task):
         self.tasks[task.task_id] = deepcopy(task)
+
+    async def apply_changes(self, changes):
+        await self.save_task(changes.task)
+        self.decisions.extend(deepcopy(changes.decisions))
+        if changes.event:
+            self.robot_events[changes.event.event_id] = deepcopy(changes.event)
+
+    async def event_seen(self, event):
+        return event.event_id in self.robot_events
+
+    async def append_event(self, task_id, value):
+        self.events.append((task_id, deepcopy(value)))
+
+    async def find_event_task(self, event):
+        return next((deepcopy(task) for task in self.tasks.values() if task.customer_id == event.customer_id
+                     and any(command.command_id == event.cmd_id for command in task.commands)), None)
 
     async def list_tasks(self):
         return deepcopy(list(self.tasks.values()))
@@ -40,10 +65,10 @@ class MemoryTestStore:
     async def put_request(self, customer_id, actor_id, key, digest, task_id):
         self.request_keys[customer_id, actor_id, key] = (digest, task_id)
 
-    async def claim_slot(self, task_id):
-        if self.slot not in (None, task_id):
+    async def claim_slot(self, deployment_id, task):
+        if self.slot not in (None, task.task_id):
             return False
-        self.slot = task_id
+        self.slot = task.task_id
         return True
 
     async def release_slot(self, task_id):
@@ -81,6 +106,7 @@ class TestResources:
 
 
 class TestPolicy:
+    version = "test-policy:v1"
     def __init__(self, result):
         self.result = result
 

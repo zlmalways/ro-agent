@@ -1,8 +1,9 @@
 """Combine pure plan validation with the injected authorization boundary."""
 
 from dataclasses import dataclass
+from uuid import uuid4
 
-from robot_agent.domain.models import PlanError, ValidationResult
+from robot_agent.domain.models import Decision, PlanError, ValidationResult
 from robot_agent.domain.validation import validate_plan
 
 
@@ -10,6 +11,7 @@ from robot_agent.domain.validation import validate_plan
 class CheckResult:
     validation: ValidationResult
     authorization: str
+    records: tuple[Decision, ...]
 
 
 class Preflight:
@@ -24,4 +26,9 @@ class Preflight:
         result = await self.policy.evaluate(context, candidate, list(approvals))
         if result not in {"allow", "deny", "require_confirmation", "unavailable"}:
             result = "unavailable"
-        return CheckResult(validated, result)
+        records = (
+            Decision(str(uuid4()), "validation", "valid", "serial-grounding:v1", (snapshot.snapshot_id,)),
+            Decision(str(uuid4()), "authorization", result, getattr(self.policy, "version", ""),
+                     (snapshot.snapshot_id,), {"phase": phase, "actor_id": context.actor_id}),
+        )
+        return CheckResult(validated, result, records)

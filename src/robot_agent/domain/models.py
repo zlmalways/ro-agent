@@ -1,6 +1,7 @@
 """Domain data contracts independent of HTTP, SDKs, and persistence."""
 
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any, Mapping
 
 
@@ -149,6 +150,23 @@ class RobotEvent:
     connection_generation: int
     cmd_id: str
     state: str
+    received_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+@dataclass(frozen=True)
+class Decision:
+    decision_id: str
+    kind: str
+    result: str
+    rule_or_policy_version: str
+    evidence_refs: tuple[str, ...] = ()
+    detail: Mapping[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class TaskEvent:
+    event_type: str
+    public_payload: Mapping[str, Any]
 
 
 @dataclass(frozen=True)
@@ -180,6 +198,7 @@ class ChangeSet:
     task: Task
     command: Command | None = None
     event: RobotEvent | None = None
+    decisions: tuple[Decision, ...] = ()
 
 
 @dataclass(frozen=True)
