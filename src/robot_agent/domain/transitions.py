@@ -36,7 +36,7 @@ def check_transition(task: Task, command: Command | None, event: RobotEvent, *, 
             reason = task.reason_code
             if reason == "RESULT_UNKNOWN":
                 state, reason = ("SUCCEEDED" if len(completed) == len(task.plan.steps) else "RUNNING"), ""
-            if task.state == "CANCEL_REQUESTED":
+            if task.cancel_requested or task.state == "CANCEL_REQUESTED":
                 state = "CANCELLED"
             elif task.state == "BLOCKED" and reason and reason != "RESULT_UNKNOWN":
                 state = "BLOCKED"
@@ -55,4 +55,5 @@ def uncertain_execution(task: Task) -> ChangeSet:
         return ChangeSet(task)
     # Preserve independent isolation/authorization reasons; uncertainty still stays on the command.
     reason = task.reason_code if task.reason_code and task.reason_code != "RESULT_UNKNOWN" else "RESULT_UNKNOWN"
-    return ChangeSet(replace(task, commands=changed, state="BLOCKED", reason_code=reason, version=task.version + 1))
+    state = "CANCEL_REQUESTED" if task.cancel_requested else "BLOCKED"
+    return ChangeSet(replace(task, commands=changed, state=state, reason_code=reason, version=task.version + 1))

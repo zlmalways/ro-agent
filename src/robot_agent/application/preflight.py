@@ -40,6 +40,7 @@ class Preflight:
         result = await self.policy.evaluate(context, candidate, list(approvals))
         if result not in {"allow", "deny", "require_confirmation", "unavailable"}:
             result = "unavailable"
+        base_result = result
         if result == "require_confirmation" and plan and any(approval_covers(
                 evidence, customer_id=context.customer_id, plan_id=plan.plan_id, revision=plan.revision,
                 scope=tuple(step.step_id for step in plan.steps), policy_version=getattr(self.policy, "version", ""),
@@ -48,7 +49,7 @@ class Preflight:
         records = (
             Decision(str(uuid4()), "validation", "valid", "serial-grounding:v1", (snapshot.snapshot_id,)),
             Decision(str(uuid4()), "authorization", result, getattr(self.policy, "version", ""),
-                     (snapshot.snapshot_id,), {"phase": phase, "actor_id": context.actor_id}),
+                     (snapshot.snapshot_id,), {"phase": phase, "actor_id": context.actor_id, "base_result": base_result}),
         )
         return CheckResult(validated, result, records)
 

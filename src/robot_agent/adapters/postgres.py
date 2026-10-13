@@ -21,7 +21,8 @@ def _json(value):
 
 def _snapshot(value):
     return ContextSnapshot(**{**value, "skills": frozenset(value["skills"]),
-                              "allowed_actions": frozenset(value["allowed_actions"])})
+                              "allowed_actions": frozenset(value["allowed_actions"]),
+                              "valid_until": datetime.fromisoformat(value["valid_until"]) if value.get("valid_until") else None})
 
 
 class PostgresStore:
@@ -108,14 +109,17 @@ class TaskTransaction:
                                       task.actor_id, task.goal_text, task.state, task.reason_code, task.version, task.unit_id)
         self.loaded_versions[task.task_id] = task.version
 
-    async def load_task(self, task_id, *, for_update=False):
+    async def load_task(self, task_id, *, for_update=False, actor_scope=True):
         values = [task_id]
         scope = ""
         if self.context is not None:
-            scope = " AND customer_id=$2 AND actor_id=$3 AND actor_kind=$4"
-            values += [self.context.customer_id, self.context.actor_id, self.context.actor_kind]
+            scope = " AND customer_id=$2"
+            values += [self.context.customer_id]
+            if actor_scope:
+                scope += " AND actor_id=$3 AND actor_kind=$4"
+                values += [self.context.actor_id, self.context.actor_kind]
         row = await self.connection.fetchrow("SELECT * FROM ra_tasks WHERE task_id=$1" + scope
-                                              + (" FOR UPDATE" if for_update else ""), *values)
+                                              + (" FOR UPDATE" if for_update else " FOR SHARE"), *values)
         if row is None:
             raise NotFoundError("object not found")
         plan, snapshot = None, None
@@ -135,7 +139,8 @@ class TaskTransaction:
         self.loaded_versions[task_id] = row["version"]
         return Task(task_id, row["customer_id"], row["actor_kind"], row["actor_id"], row["goal_text"], row["state"],
                     row["reason_code"], row["version"], plan, snapshot, row["unit_id"], commands,
-                    tuple(row["completed"]), row["clarification"], row["result_disputed"], row["clarification_id"], tuple(row["answers"]))
+                    tuple(row["completed"]), row["clarification"], row["result_disputed"], row["clarification_id"], tuple(row["answers"]),
+                    row["cancel_requested"], row["resume_phase"])
 
     async def load_facts(self, task_id, *, for_update):
         return await self.load_task(task_id, for_update=for_update)
@@ -156,10 +161,11 @@ class TaskTransaction:
                                or json.loads(stored["snapshot"]) != json.loads(snapshot_json)):
                     raise ConflictError("plan version is immutable")
             status = await self.connection.execute("""UPDATE ra_tasks SET state=$1,reason_code=$2,active_plan_id=$3,
-                completed=$4,clarification=$5,result_disputed=$6,version=$7,updated_at=clock_timestamp()
-                ,clarification_id=$11,answers=$12 WHERE customer_id=$8 AND task_id=$9 AND version=$10""", task.state, task.reason_code,
+                completed=$4,clarification=$5,result_disputed=$6,cancel_requested=$7,resume_phase=$8,version=$9,updated_at=clock_timestamp(),
+                clarification_id=$10,answers=$11 WHERE customer_id=$12 AND task_id=$13 AND version=$14""", task.state, task.reason_code,
                 task.plan.plan_id if task.plan else None, list(task.completed), task.clarification, task.result_disputed,
-                task.version, task.customer_id, task.task_id, expected, task.clarification_id, list(task.answers))
+                task.cancel_requested, task.resume_phase, task.version, task.clarification_id, list(task.answers),
+                task.customer_id, task.task_id, expected)
             if status != "UPDATE 1":
                 raise ConflictError("task version changed")
             if task.plan:
@@ -194,14 +200,15 @@ class TaskTransaction:
             await self.connection.execute("""UPDATE ra_commands SET dispatch_state=$1,outcome=$2,evidence_conflict=$3,
                 evidence_ids=$4,version=version+1,dispatch_generation=$8,owner_run_id=$9,
                 sent_at=CASE WHEN $1='SENT' THEN coalesce(sent_at,clock_timestamp()) ELSE sent_at END,
-                finished_at=CASE WHEN $2 IN ('SUCCEEDED','FAILED') THEN coalesce(finished_at,clock_timestamp()) ELSE finished_at END
+                finished_at=CASE WHEN $2 IN ('SUCCEEDED','FAILED') THEN coalesce(finished_at,clock_timestamp()) ELSE finished_at END,
+                dispatch_started_at=CASE WHEN $1='DISPATCHING' THEN coalesce(dispatch_started_at,clock_timestamp()) ELSE dispatch_started_at END
                 WHERE customer_id=$5 AND command_id=$6 AND version=$7""", command.dispatch_state, command.outcome,
                 command.evidence_conflict, list(command.evidence_ids), command.customer_id, command.command_id, original["version"],
                 command.dispatch_generation, command.owner_run_id)
         else:
             await self.connection.execute("""INSERT INTO ra_commands (customer_id,command_id,task_id,unit_id,plan_id,
-                binding_id,step_id,wire_skill,wire_args,dispatch_generation,dispatch_state,outcome,evidence_conflict,evidence_ids,owner_run_id)
-                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,$10,$11,$12,$13,$14,$15)""", command.customer_id,
+                binding_id,step_id,wire_skill,wire_args,dispatch_generation,dispatch_state,outcome,evidence_conflict,evidence_ids,owner_run_id,dispatch_started_at)
+                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,$10,$11,$12,$13,$14,$15,CASE WHEN $11='DISPATCHING' THEN clock_timestamp() ELSE NULL END)""", command.customer_id,
                 command.command_id, command.task_id, command.unit_id, command.plan_id, command.robot_binding_id,
                 command.step_id, command.wire_skill, wire_json, command.dispatch_generation, command.dispatch_state,
                 command.outcome, command.evidence_conflict, list(command.evidence_ids), command.owner_run_id)
@@ -278,7 +285,7 @@ class TaskTransaction:
                                       context.customer_id, context.actor_id, key)
 
     async def task_events(self, task_id, after, limit):
-        task = await self.load_task(task_id)
+        task = await self.load_task(task_id, actor_scope=False)
         rows = await self.connection.fetch("""SELECT seq,task_version,event_type,public_payload FROM ra_task_events
             WHERE customer_id=$1 AND task_id=$2 AND seq>$3 ORDER BY seq LIMIT $4""", task.customer_id, task_id, after, limit)
         return [{"seq": row["seq"], "task_version": row["task_version"], "event_type": row["event_type"],
@@ -339,6 +346,8 @@ class SystemTaskTransaction(TaskTransaction):
         await self.connection.execute("""INSERT INTO ra_resource_heads (customer_id,binding_id,kind,revision)
             VALUES ($1,$2,$3,$4) ON CONFLICT (customer_id,binding_id,kind) DO UPDATE SET revision=EXCLUDED.revision""",
             context.customer_id, binding_id, kind, revision)
+        await self.connection.execute("UPDATE ra_robot_bindings SET version=version+1 WHERE customer_id=$1 AND binding_id=$2",
+                                      context.customer_id, binding_id)
         return {"binding_id": binding_id, "kind": kind, "revision": revision, "entries": dict(entries)}
 
     async def current_resource(self, customer_id, binding_id, kind):
@@ -389,6 +398,12 @@ class SystemTaskTransaction(TaskTransaction):
             connection_generation,event_type,received_at,payload) VALUES ($1,$2,$3,$4,'diagnostic',clock_timestamp(),$5::jsonb)
             ON CONFLICT (customer_id,event_id) DO NOTHING""", binding["customer_id"], event_id, binding["binding_id"],
             generation, _json(frame))
+
+    async def expired_task_ids(self, timeout_seconds):
+        rows = await self.connection.fetch("""SELECT DISTINCT task_id FROM ra_commands WHERE dispatch_state IN ('DISPATCHING','SENT')
+            AND outcome IN ('NONE','RUNNING') AND dispatch_started_at < clock_timestamp() - $1::double precision * interval '1 second'
+            ORDER BY task_id""", timeout_seconds)
+        return [row["task_id"] for row in rows]
 
     async def release_slot(self, task_id):
         await self.connection.execute("""UPDATE ra_execution_guard SET customer_id=NULL,task_id=NULL,unit_id=NULL,

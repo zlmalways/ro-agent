@@ -126,11 +126,8 @@ async def decide_task(task_id: str, body: DecisionInput, request: Request):
     context = await web_context(request)
     service = request.app.state.service
     try:
-        view = await service.get(context, task_id)
-        if view.plan_id != body.plan_id:
-            raise ConflictError("plan version changed")
         return asdict(await service.decide(context, task_id, body.expected_version, body.decision,
-                                            request.headers.get("idempotency-key", "")))
+                                            request.headers.get("idempotency-key", ""), plan_id=body.plan_id))
     except PermissionError as exc:
         raise HTTPException(403, str(exc)) from None
     except ConflictError as exc:

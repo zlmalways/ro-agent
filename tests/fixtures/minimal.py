@@ -34,7 +34,7 @@ class MemoryTestStore:
     async def insert_task(self, task):
         self.tasks[task.task_id] = deepcopy(task)
 
-    async def load_task(self, task_id, *, for_update=False):
+    async def load_task(self, task_id, *, for_update=False, actor_scope=True):
         return deepcopy(self.tasks[task_id])
 
     async def save_task(self, task):

@@ -4,9 +4,11 @@ import asyncio
 import os
 from pathlib import Path
 import sys
+import logging
 from uuid import uuid4
 
 import asyncpg
+from robot_agent.domain.models import DependencyUnavailable, PreflightBlocked
 
 
 class RuntimeOwnership:
@@ -98,6 +100,7 @@ class Runtime:
         self.scan_interval = scan_interval
         self.stopping = asyncio.Event()
         self.loop_task = None
+        self.error = ""
 
     async def start(self):
         if not await self.owner.acquire():
@@ -107,7 +110,17 @@ class Runtime:
 
     async def _run(self):
         while not self.stopping.is_set() and await self.owner.healthy():
-            await self.service.dispatch_next(self.deployment_id)
+            try:
+                await self.service.expire_commands(self.deployment_id)
+                await self.service.dispatch_next(self.deployment_id)
+                self.error = ""
+            except (DependencyUnavailable, PreflightBlocked) as exc:
+                self.error = type(exc).__name__
+                logging.getLogger(__name__).warning("runtime dependency unavailable: %s", self.error)
+            except (OSError, asyncpg.PostgresError, asyncpg.InterfaceError):
+                self.error = "STORAGE_UNAVAILABLE"
+                self.owner._disable()
+                return
             try:
                 await asyncio.wait_for(self.stopping.wait(), self.scan_interval)
             except asyncio.TimeoutError:
@@ -117,8 +130,12 @@ class Runtime:
         self.owner._disable()
         self.stopping.set()
         if self.loop_task is not None:
-            await self.loop_task
-        await self.owner.close()
+            try:
+                await self.loop_task
+            finally:
+                await self.owner.close()
+        else:
+            await self.owner.close()
 
 
 class SubmissionOrderQueue:

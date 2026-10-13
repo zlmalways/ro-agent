@@ -47,7 +47,10 @@ def create_app(*, service=None, identity=None, resources=None, inputs=None):
     @app.get("/health")
     async def health():
         ready = app.state.service is not None
+        runtime = getattr(app.state, "runtime", None)
+        if runtime is not None:
+            ready = ready and not runtime.error and runtime.loop_task is not None and not runtime.loop_task.done()
         return JSONResponse(status_code=200 if ready else 503,
-                            content={"configured": ready, "execution_enabled": getattr(app.state, "execution_enabled", False)})
+                            content={"configured": ready, "execution_enabled": getattr(app.state, "execution_enabled", False) and ready})
 
     return app

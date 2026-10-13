@@ -23,3 +23,7 @@ class ConfiguredPolicy:
         actor = self.identity.current_actor(context)
         return (actor is not None and task.customer_id == context.customer_id
                 and "approver" in actor.get("roles", []))
+
+    async def can_cancel(self, context, task):
+        return (self.identity.current_actor(context) is not None and task.customer_id == context.customer_id
+                and task.actor_id == context.actor_id)

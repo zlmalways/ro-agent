@@ -1,6 +1,6 @@
 """Customer-owned, immutable capability and environment documents."""
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import json
 from uuid import uuid4
 
@@ -64,7 +64,9 @@ class Resources:
             return evidence.get("value") if 0 <= (now - instant).total_seconds() <= self.freshness_seconds else None
 
         connected = observations.get("connected", {}).get("value") is True
-        skills = frozenset(fresh("skills") or ()) if connected and not binding["isolation_reason"] else frozenset()
+        declaration = observations.get("skills", {})
+        skills = frozenset(declaration.get("value", ())) if connected and not binding["isolation_reason"] \
+            and declaration.get("connection_generation") == generation else frozenset()
         waypoints, skill_refs = {}, {}
         if environment:
             for name in fresh("waypoint_names") or ():
@@ -77,6 +79,10 @@ class Resources:
                     skill_refs[identifier] = f"capability:{binding['binding_id']}:{capability['revision']}:{identifier}"
         readiness = {field: fresh(field) for field in ("nav_server_ready", "brain_server_ready", "brain_engine", "busy")
                      if fresh(field) is not None}
+        deadline_fields = tuple(readiness) + ("waypoint_names", "brain_skills")
+        deadlines = [datetime.fromisoformat(observations[field]["received_at"]) + timedelta(seconds=self.freshness_seconds)
+                     for field in deadline_fields if fresh(field) is not None]
         return ContextSnapshot(context.customer_id, binding["binding_id"], generation, skills, waypoints, skill_refs,
                                readiness, str(uuid4()), frozenset(binding["allowed_capabilities"]), observations,
-                               capability["entries"] if capability else {}, environment["entries"] if environment else {})
+                               capability["entries"] if capability else {}, environment["entries"] if environment else {}, binding["version"],
+                               min(deadlines) if deadlines else None)

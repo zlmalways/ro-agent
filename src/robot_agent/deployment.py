@@ -77,10 +77,12 @@ def build_app(configuration, *, environment=None):
                                               max_response_bytes=limits["provider_response_bytes"])
             asr = DoubaoASR()
             if configuration.get("allow_external_calls") is True and environment.get("VOICE_ASR_PROVIDER") == "doubao":
+                if not limits.get("asr_timeout") or limits["asr_timeout"] <= 0:
+                    raise ValueError("explicit ASR timeout is required")
                 provider = DoubaoStream(api_key=environment.get("VOICE_ASR_DOUBAO_API_KEY", ""),
                                         resource_id=environment.get("VOICE_ASR_DOUBAO_RESOURCE_ID", ""),
                                         stream_url=environment.get("VOICE_ASR_DOUBAO_STREAM_URL", ""),
-                                        timeout_seconds=limits["command_timeout"], max_response_bytes=limits["provider_response_bytes"])
+                                        timeout_seconds=limits["asr_timeout"], max_response_bytes=limits["provider_response_bytes"])
                 asr = DoubaoASR(provider)
             owner = RuntimeOwnership(dsn=dsn, deployment_id=deployment["id"], host_id=deployment["host_id"],
                                      lock_path=deployment["lock_path"], advisory_key=deployment["advisory_key"],
@@ -88,7 +90,8 @@ def build_app(configuration, *, environment=None):
             service = TaskService(store=store, planner=planner, robot=None, resources=resources, policy=policy,
                                   catalog=ActionCatalog({"move_to": ("location",), "vla_skill": ("skill_id",)}),
                                   queue_policy=SubmissionOrderQueue(), ownership=owner,
-                                  max_text_chars=limits["max_text_chars"], max_plan_steps=limits["max_plan_steps"])
+                                  max_text_chars=limits["max_text_chars"], max_plan_steps=limits["max_plan_steps"],
+                                  command_timeout_seconds=limits["command_timeout"])
             robot = Dlv0Robot(service=service, write_gate=owner, max_frame_bytes=limits["max_frame_bytes"])
             service.robot = robot
             app.state.service, app.state.resources, app.state.robot = service, resources, robot
@@ -96,10 +99,13 @@ def build_app(configuration, *, environment=None):
             if owner:
                 runtime = Runtime(owner=owner, service=service, deployment_id=deployment["id"], scan_interval=limits["scan_interval"])
                 await runtime.start()
+                app.state.runtime = runtime
             yield
         finally:
-            if runtime:
-                await runtime.close()
-            await pool.close()
+            try:
+                if runtime:
+                    await runtime.close()
+            finally:
+                await pool.close()
     app.router.lifespan_context = lifespan
     return app

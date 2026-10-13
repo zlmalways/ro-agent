@@ -107,6 +107,8 @@ class ContextSnapshot:
     readiness_evidence: Mapping[str, Any] = field(default_factory=dict)
     capability_labels: Mapping[str, str] = field(default_factory=dict)
     environment_labels: Mapping[str, str] = field(default_factory=dict)
+    binding_version: int = 0
+    valid_until: datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -208,6 +210,8 @@ class Task:
     result_disputed: bool = False
     clarification_id: str = ""
     answers: tuple[str, ...] = ()
+    cancel_requested: bool = False
+    resume_phase: str = ""
 
 
 @dataclass(frozen=True)

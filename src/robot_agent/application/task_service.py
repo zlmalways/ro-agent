@@ -12,7 +12,7 @@ from robot_agent.domain.models import (
 )
 
 from .executor import Executor
-from .preflight import Preflight
+from .preflight import Preflight, approval_covers
 from robot_agent.domain.transitions import uncertain_execution
 
 
@@ -36,7 +36,7 @@ def task_view(task):
 
 class TaskService:
     def __init__(self, *, store, planner, robot, resources, policy, catalog, queue_policy=None, ownership=None,
-                 max_text_chars=None, max_plan_steps=None):
+                 max_text_chars=None, max_plan_steps=None, command_timeout_seconds=None):
         self.store = store
         self.planner = planner
         self.robot = robot
@@ -49,6 +49,7 @@ class TaskService:
         self.ownership = ownership
         self.max_text_chars = max_text_chars
         self.max_plan_steps = max_plan_steps
+        self.command_timeout_seconds = command_timeout_seconds
 
     async def submit(self, context, value, request_key):
         if not value.text.strip() or not request_key:
@@ -62,16 +63,22 @@ class TaskService:
             if existing:
                 if existing[0] != digest:
                     raise ConflictError("request key content conflict")
-                return task_view(await tx.load_task(existing[1]))
-            task = Task(str(uuid4()), context.customer_id, context.actor_kind, context.actor_id, value.text,
-                        state="PLANNING", unit_id=str(uuid4()))
-            await tx.insert_task(task)
-            await tx.put_request(context.customer_id, context.actor_id, request_key, digest, task.task_id)
-            await tx.append_event(task.task_id, TaskEvent("received", {"state": task.state}))
-        snapshot = await self.resources.snapshot(context)
+                task = await tx.load_task(existing[1], for_update=True)
+                if task.state != "BLOCKED" or task.resume_phase != "PLANNING":
+                    return task_view(task)
+                task = replace(task, state="PLANNING", reason_code="", version=task.version + 1)
+                await tx.apply_changes(ChangeSet(task))
+                await tx.append_event(task.task_id, TaskEvent("planning_retried", {"state": task.state}))
+            else:
+                task = Task(str(uuid4()), context.customer_id, context.actor_kind, context.actor_id, value.text,
+                            state="PLANNING", unit_id=str(uuid4()))
+                await tx.insert_task(task)
+                await tx.put_request(context.customer_id, context.actor_id, request_key, digest, task.task_id)
+                await tx.append_event(task.task_id, TaskEvent("received", {"state": task.state}))
         records = ()
         provider_error = None
         try:
+            snapshot = await self.resources.snapshot(context)
             candidate = await self.planner.plan(value.text, [], snapshot)
             if self.max_plan_steps is not None and len(candidate.steps) > self.max_plan_steps:
                 raise PlanError("PLAN_LIMIT_EXCEEDED")
@@ -88,7 +95,7 @@ class TaskService:
                 records = check.records
         except DependencyUnavailable as exc:
             provider_error = exc
-            task = replace(task, state="BLOCKED", reason_code="PLANNER_UNAVAILABLE")
+            task = replace(task, state="BLOCKED", reason_code=str(exc), resume_phase="PLANNING")
         except PreflightBlocked as exc:
             task = replace(task, state="BLOCKED", reason_code=str(exc))
         except PlanError:
@@ -123,7 +130,8 @@ class TaskService:
                 raise ConflictError("task already ended")
             in_flight = next((command for command in task.commands if command.dispatch_state != "PREPARED"
                              and command.outcome not in {"SUCCEEDED", "FAILED"}), None)
-            changed = replace(task, state="CANCEL_REQUESTED" if in_flight else "CANCELLED", version=task.version + 1)
+            changed = replace(task, state="CANCEL_REQUESTED" if in_flight else "CANCELLED", cancel_requested=True,
+                              version=task.version + 1)
             await tx.apply_changes(ChangeSet(changed))
             await tx.put_request(context.customer_id, context.actor_id, request_key, digest, task_id, "cancel")
             await tx.append_event(task_id, TaskEvent("cancel_requested", {"state": changed.state}))
@@ -213,8 +221,11 @@ class TaskService:
                 binding = await tx.get_binding(task.customer_id, task.snapshot.robot_binding_id)
                 if binding is None or not binding["enabled"] or binding["isolation_reason"]:
                     continue
+                if snapshot.binding_version and (binding["version"] != snapshot.binding_version
+                                                 or binding["connection_generation"] != snapshot.generation):
+                    continue
                 prepared = next((item for item in task.commands if item.dispatch_state == "PREPARED"), None)
-                if resuming_prepared and prepared:
+                if prepared and not task.cancel_requested:
                     change = ChangeSet(replace(task, state="RUNNING", reason_code="", version=task.version + 1), prepared)
                 else:
                     change = self.executor.prepare(context, None, task)
@@ -240,6 +251,12 @@ class TaskService:
             async with self.store.system_unit_of_work() as tx:
                 task = await tx.load_task(task.task_id, for_update=True)
                 binding = await tx.get_binding(task.customer_id, task.snapshot.robot_binding_id)
+                if snapshot.binding_version and (not binding or binding["version"] != snapshot.binding_version
+                                                 or binding["connection_generation"] != snapshot.generation):
+                    await tx.apply_changes(ChangeSet(replace(task, state="BLOCKED", reason_code="REVALIDATION_REQUIRED",
+                                                            version=task.version + 1)))
+                    await tx.append_event(task.task_id, TaskEvent("dispatch_blocked", {"reason_code": "REVALIDATION_REQUIRED"}))
+                    return
                 if check.authorization != "allow" or not binding or not binding["enabled"] or binding["isolation_reason"]:
                     reason = "AUTHORIZATION_" + check.authorization.upper() if check.authorization != "allow" else "BINDING_ISOLATED"
                     await tx.apply_changes(ChangeSet(replace(task, state="BLOCKED", reason_code=reason,
@@ -317,7 +334,7 @@ class TaskService:
             await tx.apply_changes(ChangeSet(replace(task, state="BLOCKED", reason_code=reason, version=task.version + 1)))
             await tx.append_event(task.task_id, TaskEvent("blocked", {"reason_code": reason}))
 
-    async def decide(self, context, task_id, expected_version, decision, request_key):
+    async def decide(self, context, task_id, expected_version, decision, request_key, *, plan_id=None):
         if decision not in {"approve", "reject"}:
             raise PlanError("invalid approval decision")
         digest = sha256(json.dumps([task_id, expected_version, decision]).encode()).hexdigest()
@@ -333,6 +350,8 @@ class TaskService:
             raise NotFoundError("object not found")
         if not await self.policy.can_approve(context, task):
             raise PermissionError("APPROVAL_DENIED")
+        if plan_id is not None and (task.plan is None or task.plan.plan_id != plan_id):
+            raise ConflictError("plan version changed")
         if task.version != expected_version:
             raise ConflictError("task version changed")
         if task.plan is None or task.state not in {"WAITING_APPROVAL", "BLOCKED"} \
@@ -426,10 +445,27 @@ class TaskService:
                 task = await tx.load_task(original.task_id, for_update=True)
                 if task.state in {"SUCCEEDED", "FAILED", "CANCELLED"}:
                     continue
+                if task.state == "PLANNING":
+                    changed = replace(task, state="BLOCKED", reason_code="PLANNING_INTERRUPTED", resume_phase="PLANNING",
+                                      version=task.version + 1)
+                    await tx.apply_changes(ChangeSet(changed))
+                    await tx.append_event(task.task_id, TaskEvent("planning_interrupted", {"reason_code": changed.reason_code}))
+                    continue
                 change = self.executor.reconcile(task)
                 if change.task != task:
                     await tx.apply_changes(change)
                     await tx.append_event(task.task_id, TaskEvent("reconciled", {"reason_code": change.task.reason_code}))
+
+    async def expire_commands(self, deployment_id):
+        if self.command_timeout_seconds is None:
+            return
+        async with self.store.system_unit_of_work() as tx:
+            for task_id in await tx.expired_task_ids(self.command_timeout_seconds):
+                task = await tx.load_task(task_id, for_update=True)
+                change = uncertain_execution(task)
+                if change.task != task:
+                    await tx.apply_changes(change)
+                    await tx.append_event(task_id, TaskEvent("result_unknown", {"reason_code": "COMMAND_TIMEOUT"}))
 
     async def may_write(self, command):
         if self.ownership is None or not await self.ownership.healthy() or command.owner_run_id != self.ownership.run_id:
@@ -441,17 +477,46 @@ class TaskService:
                 return False
             if task.customer_id != command.customer_id:
                 return False
+            approvals = await tx.approvals(task)
+        context = TrustedContext(task.customer_id, task.actor_kind, task.actor_id)
+        try:
+            snapshot = await self.resources.snapshot(context)
+            check = await self.preflight.check(context, task.plan, snapshot, "write", approvals)
+        except (PlanError, PreflightBlocked, DependencyUnavailable):
+            return False
+        if check.authorization != "allow":
+            return False
+        async with self.store.system_unit_of_work() as tx:
+            current = await tx.load_task(task.task_id, for_update=True)
+            if current.version != task.version or current.cancel_requested:
+                return False
             binding = await tx.get_binding(command.customer_id, command.robot_binding_id)
-            stored = next((item for item in task.commands if item.command_id == command.command_id), None)
+            if snapshot.binding_version and (not binding or binding["version"] != snapshot.binding_version
+                                             or binding["connection_generation"] != snapshot.generation):
+                return False
+            if snapshot.valid_until is not None and datetime.now(timezone.utc) >= snapshot.valid_until:
+                return False
+            latest = await tx.approvals(current)
+            if latest != approvals:
+                return False
+            if check.records[-1].detail["base_result"] == "require_confirmation" and not any(approval_covers(
+                    evidence, customer_id=task.customer_id, plan_id=task.plan.plan_id, revision=task.plan.revision,
+                    scope=tuple(step.step_id for step in task.plan.steps), policy_version=self.policy.version,
+                    now=datetime.now(timezone.utc)) for evidence in latest):
+                return False
+            if check.records[-1].rule_or_policy_version != self.policy.version:
+                return False
+            stored = next((item for item in current.commands if item.command_id == command.command_id), None)
             return (binding is not None and binding["enabled"] and not binding["isolation_reason"]
                     and binding["connection_generation"] == command.dispatch_generation
                     and stored is not None and stored.dispatch_state == "DISPATCHING"
-                    and stored.outcome not in {"SUCCEEDED", "FAILED"} and task.state == "RUNNING")
+                    and stored.outcome not in {"SUCCEEDED", "FAILED", "RESULT_UNKNOWN"} and current.state == "RUNNING")
 
     async def get(self, context, task_id):
         async with self.store.unit_of_work(context) as tx:
-            task = await tx.load_task(task_id)
-            if task.customer_id != context.customer_id or task.actor_id != context.actor_id:
+            task = await tx.load_task(task_id, actor_scope=False)
+            if task.customer_id != context.customer_id or (task.actor_id != context.actor_id and
+                    ("approver" not in context.roles or not await self.policy.can_approve(context, task))):
                 raise NotFoundError(task_id)
             return task_view(task)
 
@@ -459,5 +524,8 @@ class TaskService:
         if after < 0:
             raise PlanError("invalid event cursor")
         async with self.store.unit_of_work(context) as tx:
+            task = await tx.load_task(task_id, actor_scope=False)
+            if task.actor_id != context.actor_id and ("approver" not in context.roles or not await self.policy.can_approve(context, task)):
+                raise NotFoundError(task_id)
             events = await tx.task_events(task_id, after, 100)
         return {"events": events, "next_seq": events[-1]["seq"] if events else after}
