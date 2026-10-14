@@ -1,5 +1,7 @@
 # 机器人 Agent 首期实施计划
 
+2026-10-14 状态补充：本页保留原阶段实施计划，不把未勾选项或初始待定描述当当前实现状态。后续开发和确认记录见 README／acceptance；数据、配置、账号登录及在线管理的新增工作以[专项计划](2026-10-14-data-configuration-boundaries.md)为准，未授权本轮实施代码。完整分类只在[数据边界清单](../../data-configuration-boundaries.md)维护。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking. 用户选择执行方式后使用对应流程，不自行扩大并行实现范围。
 
 **Goal:** 交付一个独立单机器人自然语言任务服务，以完整计划、受控执行及可靠证据反馈形成闭环；真实物理交付需要单独获准联调。
@@ -151,4 +153,4 @@
 - T01—T26 全部映射上述任务，A01—A07 映射适配变化、来源与恢复测试。TDD 的红灯必须是相应行为缺失，不是装依赖失败。
 - 方法和类型沿用“结构与接口约定”；实现时低风险内部选择可在任务中说明，产品行为／部署保障变动需确认。
 - 独立 builder-check 已指出三项条件，context 文档保存它们；没有声称全规格独立通过或测试已运行。
-- 正式部署已确认 Linux 单机进程；执行方式、队列政策尚待用户确认。缺供应商、政策或真机条件时持续完成不依赖它们的任务，相关生产能力保持关闭；不会把 P0 当成首期交付。
+- 正式部署记录为 Linux 单机进程；原队列待定项已有后续确认记录，见总规格第 8、13 节。本次账号／动态管理专项的产品细节和代码实施仍待确认；缺供应商、政策或真机条件的能力保持关闭，不把 P0 当交付。

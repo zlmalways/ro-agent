@@ -4,6 +4,8 @@
 
 ## 当前状态
 
+2026-10-14 已更新数据边界技术文档：账号、客户成员、机器人登记和客户政策应由数据库动态维护，部署参数和平台秘密留在部署配置。当前仍是静态身份／政策装配；自带账号登录和完整在线管理尚未实现。见[完整清单](docs/data-configuration-boundaries.md)、[专项实施计划](docs/superpowers/plans/2026-10-14-data-configuration-boundaries.md)和[文档核对记录](docs/data-configuration-review.md)。文档更新不代表代码改造或新增验收通过。
+
 已实现计划验证、任务受理、一次下发和反馈归约；PostgreSQL 事务、不可变记录、请求幂等、客户隔离；dlv/0 WebSocket、连接代次、隔离和未知结果恢复；Linux 主机锁加数据库独立会话锁。已提供配置、身份、政策和部署装配代码，但正式配置、真实提供方与真机未验收，不能称为已交付系统。
 
 用户已批准首期按提交时间依次执行、排队任务不自动过期并保留到用户取消、开始前重新检查执行条件。队列依据数据库 `queue_seq`，不引入消息队列服务；真实凭据、供应商调用、真机、正式主机和锁目录验收仍有门禁。
@@ -22,6 +24,7 @@
 - [V5 设计基线](docs/superpowers/specs/2026-10-12-robot-agent-v5.md)
 - [独立阅读检查与本仓库适配](docs/superpowers/specs/2026-10-12-ro-agent-context.md)
 - [首期实施计划](docs/superpowers/plans/2026-10-12-robot-agent-v1.md)
+- [数据与配置边界专项计划](docs/superpowers/plans/2026-10-14-data-configuration-boundaries.md)（待另行批准代码实施）
 
 实现基线：Python/FastAPI、PostgreSQL、单实例、兼容现有 dlv/0；模型与 ASR 是外部适配依赖。开发采用获准的 Superpowers 流程和 TDD，生产执行不降级到内存或假模型。
 
