@@ -14,7 +14,6 @@ from websockets.asyncio.client import connect
 from websockets.exceptions import ConnectionClosed, WebSocketException
 
 log = logging.getLogger("mock_robot")
-DEFAULT_URL = "ws://127.0.0.1:18763/api/voice/robot/ws"
 
 
 def connection(url, token, robot_id):
@@ -181,7 +180,7 @@ async def send_wav(url, token, robot_id, path, timeout=90):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--url", default=DEFAULT_URL)
+    parser.add_argument("--url", required=True, help="platform WebSocket endpoint (ws:// or wss://)")
     sub = parser.add_subparsers(dest="mode", required=True)
     serve = sub.add_parser("serve")
     serve.add_argument("--robot-id", default="mock-fridge-01")

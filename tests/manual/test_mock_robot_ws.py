@@ -3,7 +3,10 @@ import asyncio
 import base64
 from contextlib import asynccontextmanager
 import json
+import os
 from pathlib import Path
+import subprocess
+import sys
 import wave
 
 import pytest
@@ -12,6 +15,45 @@ from websockets.asyncio.server import serve
 
 from robot_agent.protocol.dlv0_schema import parse_frame, ready_frame
 from tests.manual.mock_robot_ws import Simulator, command_session, send_wav, wav_segment
+
+
+CLI = (sys.executable, "-m", "tests.manual.mock_robot_ws")
+
+
+@pytest.mark.parametrize("args", [("serve",), ("send-wav", "unused.wav")])
+def test_cli_requires_url_before_using_credentials_or_connecting(args, monkeypatch):
+    monkeypatch.delenv("RO_AGENT_ROBOT_TOKEN", raising=False)
+    result = subprocess.run([*CLI, *args], capture_output=True, text=True, timeout=10)
+    assert result.returncode == 2
+    assert "--url" in result.stderr.strip().splitlines()[-1]
+
+
+async def test_serve_cli_connects_to_supplied_url():
+    accepted = asyncio.get_running_loop().create_future()
+
+    async def peer(ws):
+        accepted.set_result(ws)
+        await ws.wait_closed()
+
+    async with serve(peer, "127.0.0.1", 0) as server:
+        url = f"ws://127.0.0.1:{server.sockets[0].getsockname()[1]}/chosen-platform"
+        process = await asyncio.create_subprocess_exec(
+            *CLI, "--url", url, "serve", "--robot-id", "cli-robot",
+            env={**os.environ, "RO_AGENT_ROBOT_TOKEN": "test"},
+        )
+        try:
+            async with asyncio.timeout(10):
+                ws = await accepted
+                assert ws.request.path == "/chosen-platform?robot_id=cli-robot"
+                assert ws.request.headers["x-robot-token"] == "test"
+                await ws.send(json.dumps(ready_frame("cli-robot")))
+                assert parse_frame(json.loads(await ws.recv()))["type"] == "hello"
+                await ws.send(json.dumps(ready_frame("cli-robot", command_channel=True)))
+                assert parse_frame(json.loads(await ws.recv()))["type"] == "readiness"
+        finally:
+            if process.returncode is None:
+                process.terminate()
+            await process.wait()
 
 
 @asynccontextmanager
@@ -127,7 +169,11 @@ async def test_upload_is_one_wav_frame_on_authenticated_voice_channel(tmp_path):
 
     async with serve(peer, "127.0.0.1", 0) as server:
         url = f"ws://127.0.0.1:{server.sockets[0].getsockname()[1]}/api/voice/robot/ws"
-        await send_wav(url, "test", "sim-voice", sample, timeout=5)
+        result = await asyncio.to_thread(
+            subprocess.run, [*CLI, "--url", url, "send-wav", "--voice-id", "sim-voice", str(sample)],
+            env={**os.environ, "RO_AGENT_ROBOT_TOKEN": "test"}, capture_output=True, timeout=10,
+        )
+        assert result.returncode == 0, result.stderr
     assert len(packets) == 1 and packets[0]["type"] == "segment" and packets[0]["woke"] is True
     assert base64.b64decode(packets[0]["wav_b64"], validate=True) == sample.read_bytes()
 

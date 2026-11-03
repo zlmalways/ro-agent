@@ -4,7 +4,7 @@
 
 ## 单独启动客户端
 
-在 PowerShell 中读取随分支保存的场景资料，并连接已运行的平台。
+运行 `serve` 或 `send-wav` 时都要在子命令前填写 `--url`，指定平台的 WebSocket 地址。下面的 PowerShell 示例使用本机 `18763`，连接其他平台时请换成对应地址。
 
 ```powershell
 $scene = Get-Content -Encoding UTF8 -Raw tests/manual/fixtures/fridge-water.json | ConvertFrom-Json
