@@ -76,6 +76,16 @@ class TaskTransaction:
         self.deployment_id = deployment_id
         self.loaded_versions = {}
 
+    async def owner_history(self, limit, before):
+        rows = await self.connection.fetch("""
+            SELECT task_id, goal_text, state, reason_code, version, created_at, updated_at, queue_seq
+            FROM ra_tasks
+            WHERE customer_id=$1 AND actor_kind=$2 AND actor_id=$3
+              AND ($4::bigint IS NULL OR queue_seq < $4)
+            ORDER BY queue_seq DESC LIMIT $5""",
+            self.context.customer_id, self.context.actor_kind, self.context.actor_id, before, limit)
+        return [dict(row) for row in rows]
+
     def _check_customer(self, customer_id, actor_id=None, actor_kind=None):
         if self.context is None:
             return

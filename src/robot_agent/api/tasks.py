@@ -1,6 +1,6 @@
 from dataclasses import asdict
 
-from fastapi import APIRouter, File, HTTPException, Request, UploadFile
+from fastapi import APIRouter, File, HTTPException, Query, Request, UploadFile
 from pydantic import BaseModel, ConfigDict
 
 from robot_agent.domain.models import ConflictError, DependencyUnavailable, NotFoundError, PlanError
@@ -54,6 +54,14 @@ async def submit_audio(request: Request, audio: UploadFile = File(...)):
     except ConflictError as exc:
         raise HTTPException(409, str(exc)) from None
     return asdict(view)
+
+
+@router.get("/api/robot-agent/tasks")
+async def task_history(request: Request, limit: int = Query(30, ge=1, le=100),
+                       before: int | None = Query(None, ge=1)):
+    from .resources import web_context
+    context = await web_context(request)
+    return await request.app.state.service.history(context, limit=limit, before=before)
 
 
 @router.get("/api/robot-agent/tasks/{task_id}")

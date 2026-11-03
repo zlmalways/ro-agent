@@ -2,17 +2,56 @@
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Robot Agent · 任务控制台</title>
-  <link rel="stylesheet" href="/client/style.css">
+  <title>DeepLeap · 机器人控制台</title>
+  <link rel="icon" href="/client/deepleap-logo.png"><link rel="stylesheet" href="/client/style.css">
 </head>
 <body>
-<main>
-  <header><span class="eyebrow">ROBOT AGENT</span><h1>告诉机器人，需要做什么。</h1><p>查看计划、确认执行，并追踪机器人实际反馈。</p></header>
-  <section class="credentials"><label>访问凭据<input id="credential" type="password" autocomplete="off" placeholder="输入管理员发放的访问凭据"></label><p>凭据只保存在当前页面，不写入浏览器存储。</p></section>
-  <div class="layout">
-    <section class="composer"><h2>创建任务</h2><form id="submit-form"><label>任务指令<textarea id="goal" rows="5" required placeholder="例如：去指定的桌边，调用已登记的拿杯技能。"></textarea></label><button type="submit">提交任务</button></form><div class="divider"></div><label>语音文件<input id="audio" type="file" accept="audio/wav"></label><button id="audio-submit" class="secondary">提交语音任务</button><p class="muted">语音识别未启用时，会明确返回不可用。</p><div class="divider"></div><form id="lookup-form"><label>任务编号<input id="lookup" placeholder="输入已有任务编号"></label><button class="secondary">查询任务</button></form></section>
-    <section class="task"><div class="task-head"><h2>任务进度</h2><span id="status">尚未提交</span></div><p id="task-id" class="muted"></p><p id="reason" role="status"></p><p id="question"></p><form id="answer-form" hidden><label>澄清回答<input id="answer" required></label><button type="submit">提交回答</button></form><div id="decisions" hidden><button id="approve">批准计划</button><button id="reject" class="secondary">拒绝计划</button></div><h3>执行计划</h3><ol id="plan"><li class="muted">提交后在这里查看完整计划。</li></ol><h3>机器人执行事实</h3><div id="results" class="muted">尚无机器人反馈。</div><button id="cancel" class="danger" hidden>取消任务</button><p class="muted">取消请求不等于机器人已物理停止；未知结果会保留并等待核对。</p></section>
-  </div><p id="error" role="alert"></p>
-</main>
-<script src="/client/app.js" defer></script>
+  <aside class="rail">
+    <a class="brand" href="#home"><img src="/client/deepleap-logo.png" alt=""><strong>DeepLeap</strong></a>
+    <div class="rail-caption">机器人工作台</div>
+    <nav aria-label="工作台导航">
+      <a href="#home">首页</a><a href="#tasks">任务</a><a href="#robots">舰队</a><a href="#settings">设置</a>
+    </nav>
+  </aside>
+  <main>
+    <header><div><small>ROBOT WORKSPACE</small><h1 id="page-title">首页</h1></div>
+      <button id="compose">描述你的目标 <kbd>⌘ / Ctrl K</kbd></button></header>
+    <p id="notice" role="status"></p>
+    <section id="home">
+      <h2>任务概览</h2><div class="metrics">
+        <article><span>最近任务</span><strong id="recent-count">—</strong></article>
+        <article><span>需要处理</span><strong id="waiting-count">—</strong></article>
+        <article><span>执行中</span><strong id="active-count">—</strong></article>
+      </div>
+      <div class="card"><div class="heading"><h2>最近任务</h2><a href="#tasks">查看任务 →</a></div>
+        <div id="recent" class="rows"></div></div>
+    </section>
+    <section id="tasks" hidden><div class="card"><div class="heading"><h2>我的任务</h2><button id="refresh-tasks" class="quiet">刷新</button></div>
+      <div id="history" class="rows"></div><button id="more" class="quiet" hidden>加载更早任务</button></div>
+      <form id="lookup-form" class="card inline"><label>任务编号<input id="lookup" required></label><button>查询任务</button></form></section>
+    <section id="robots" hidden><div class="card"><div class="heading"><h2>机器人资料</h2><button id="refresh-robot" class="quiet">刷新资料</button></div>
+      <p id="robot-status" role="status">请先设置访问凭据。</p><dl id="robot-fields"></dl></div></section>
+    <section id="settings" hidden><form id="settings-form" class="card"><h2>连接工作台</h2>
+      <label>访问凭据<input id="credential" type="password" autocomplete="off" spellcheck="false"></label>
+      <p class="hint">凭据仅在当前页面使用。刷新页面后需重新输入。</p>
+      <button>应用凭据</button></form></section>
+  </main>
+  <button id="dock" aria-expanded="false" aria-controls="conversation">与机器人对话</button>
+  <section id="conversation" role="dialog" aria-label="任务对话" hidden>
+    <div class="heading"><h2>任务对话</h2><div><button id="new-task" class="quiet">新任务</button> <button id="collapse" class="quiet">收起</button></div></div>
+    <div id="task-detail" hidden>
+      <strong id="task-goal"></strong><p><span id="status" class="badge"></span> <small id="task-id"></small></p>
+      <p id="reason"></p><p id="question"></p><form id="answer-form" hidden><label>澄清回答<input id="answer" required></label><button>提交回答</button></form>
+      <div id="decisions" hidden><button id="approve">批准计划</button> <button id="reject" class="quiet">拒绝计划</button></div>
+      <h3>执行计划</h3><ol id="plan"></ol><h3>机器人执行反馈</h3><div id="results"></div>
+      <button id="cancel" class="danger" hidden>取消任务</button>
+    </div>
+    <form id="submit-form"><label>任务指令<textarea id="goal" rows="2" placeholder="例如，帮我拿杯水" required></textarea></label><button id="send">提交任务</button></form>
+    <div id="voice-input"><details><summary>语音输入</summary>
+      <label>语音文件<input id="audio" type="file" accept="audio/wav,.wav"></label>
+      <button id="audio-submit" class="quiet">上传语音任务</button> <button id="record" class="quiet">开始录音</button>
+      <span id="record-status" role="status"></span></details></div>
+    <p id="error" role="alert"></p>
+  </section>
+  <script src="/client/audio.js" defer></script><script src="/client/app.js" defer></script>
 </body></html>

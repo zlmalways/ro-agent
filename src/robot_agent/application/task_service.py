@@ -31,7 +31,7 @@ def task_view(task):
                            "description": ("导航到：" + str(step.args.get("location", "")) if step.action == "move_to"
                                            else "调用技能：" + task.snapshot.capability_labels.get(str(step.args.get("skill_id", "")),
                                                                                               str(step.args.get("skill_id", ""))))}
-                          for step in task.plan.steps) if task.plan else ())
+                          for step in task.plan.steps) if task.plan else (), goal_text=task.goal_text)
 
 
 class TaskService:
@@ -512,6 +512,12 @@ class TaskService:
                     and binding["connection_generation"] == command.dispatch_generation
                     and stored is not None and stored.dispatch_state == "DISPATCHING"
                     and stored.outcome not in {"SUCCEEDED", "FAILED", "RESULT_UNKNOWN"} and current.state == "RUNNING")
+
+    async def history(self, context, *, limit, before):
+        async with self.store.unit_of_work(context) as tx:
+            rows = await tx.owner_history(limit + 1, before)
+        page = rows[:limit]
+        return {"tasks": page, "next_before": page[-1]["queue_seq"] if len(rows) > limit else None}
 
     async def get(self, context, task_id):
         async with self.store.unit_of_work(context) as tx:

@@ -234,3 +234,4 @@ class TaskView:
     result_summary: tuple[dict, ...] = field(default_factory=tuple)
     clarification_id: str = ""
     plan_steps: tuple[dict, ...] = ()
+    goal_text: str = ""

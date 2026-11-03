@@ -37,7 +37,10 @@ async def test_submit_clarify_approve_observe_result(persisted_service, tmp_path
                 errors = []
                 page.on("pageerror", lambda error: errors.append(str(error)))
                 await page.goto(base.replace("ws://", "http://") + "/")
+                await page.get_by_role("link", name="设置").click()
                 await page.get_by_label("访问凭据").fill("test-user")
+                await page.get_by_role("button", name="应用凭据").click()
+                await page.get_by_role("button", name="描述你的目标").click()
                 await page.get_by_label("任务指令").fill("test: fetch cup")
                 await page.get_by_role("button", name="提交任务", exact=True).click()
                 await page.get_by_text("Which test table?", exact=True).wait_for()
