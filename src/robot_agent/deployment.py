@@ -4,7 +4,6 @@ from contextlib import asynccontextmanager
 import os
 from pathlib import Path
 import socket
-import sys
 
 import asyncpg
 
@@ -29,9 +28,8 @@ def build_app(configuration, *, environment=None):
     enabled = deployment.get("execution_enabled") is True
     if enabled and not all(deployment.get(key) for key in ("host_id", "lock_path", "advisory_key")):
         raise ValueError("execution requires approved host, lock path and ownership advisory key")
-    if enabled and (sys.platform != "linux" or deployment["host_id"] != socket.gethostname()
-                    or not Path(deployment["lock_path"]).is_absolute()):
-        raise ValueError("execution requires the approved Linux host and absolute shared lock path")
+    if enabled and (deployment["host_id"] != socket.gethostname() or not Path(deployment["lock_path"]).is_absolute()):
+        raise ValueError("execution requires the approved host and absolute shared lock path")
     if "database" not in configuration or "limits" not in configuration:
         raise ValueError("explicit database and operation limits are required")
     database = configuration["database"]
