@@ -2,11 +2,11 @@
 
 2026-10-14 文档修订：以下启动格式描述当前 60ac3e2 代码，不是动态账号／设备管理已经完成。[完整数据与配置清单](data-configuration-boundaries.md)规定目标边界，[专项计划](superpowers/plans/2026-10-14-data-configuration-boundaries.md)规定后续改造；本轮没有改程序或生产配置。
 
-代码可在 Windows 开发；真正机器人执行仅支持用户确认的 Linux 单机进程。当前没有正式主机、机器人目录、凭据或生产限额，不启用执行。Docker 在本机只用于隔离 PostgreSQL 和 Linux 测试，不修改 Docker Desktop 的内部文件。
+正式入口支持在指定的 Windows、macOS 或 Linux 主机上启用单进程执行。当前没有正式主机、机器人目录、凭据或生产限额，不启用执行。Docker 在本机只用于隔离 PostgreSQL 和 Linux 测试，不修改 Docker Desktop 的内部文件。
 
 ## 安装与启动
 
-在 Linux 的独立 Python 3.11+ 虚拟环境安装本仓库：`pip install .`。安装包包含网页与 SQL 迁移，不依赖旧平台代码。创建明确的 JSON 配置，通过 `RO_AGENT_CONFIG_FILE` 指定绝对路径；启动入口为 `uvicorn robot_agent.app:create_app --factory --host 127.0.0.1 --port 8000 --workers 1`。缺配置时只开放不可用状态与页面，不构造 fake LLM／Store／机器人。
+在指定主机的独立 Python 3.11+ 虚拟环境安装本仓库：`pip install .`。安装包包含网页与 SQL 迁移，不依赖旧平台代码。创建明确的 JSON 配置，通过 `RO_AGENT_CONFIG_FILE` 指定绝对路径；启动入口为 `uvicorn robot_agent.app:create_app --factory --host 127.0.0.1 --port 8000 --workers 1`。缺配置时只开放不可用状态与页面，不构造 fake LLM／Store／机器人。
 
 配置引用环境变量名字，真实密钥只写部署环境，不写 JSON、Git、页面或模型上下文。数据库用户需要本应用 schema 的迁移和运行权限；自动迁移有编号与校验和，不改写已安装迁移。启动时只新增明确登记的绑定，不覆盖既有权限或解除隔离。
 
@@ -44,6 +44,6 @@ TTS 类参数和 VoiceService 的唤醒／重复输入参数已列入清单，�
 
 启用 execution_enabled=true 时还必须提供实际 `host_id`、共享绝对 `lock_path` 和固定整数 `advisory_key`。当前主机名必须与 host_id 相符；锁目录必须预先创建、持久保存，并让此部署所有进程引用同一个对象。不要删除或替换锁文件，不通过换 ID／路径规避互斥。
 
-先取得 Linux flock，再取得独立 PostgreSQL 会话锁；锁连接不回池、不自动重连。所有权丢失后本进程禁止发送，正常重启重新核对。ra_execution_guard 保留未知在途任务，重启不清空；跨主机接管需要独立核实原主机已停止。本机 Linux 容器已测试第二进程拒绝、数据库连接终止、同锁文件、错误锁路径及其他主机拒绝，不能代替正式主机部署验收。
+进程先取得本机文件锁（Windows 使用 `msvcrt.locking`，macOS 和 Linux 使用 `flock`），再取得独立 PostgreSQL 会话锁。锁连接断开后，旧进程停止发送并要求重启。关闭进程会释放文件锁，锁文件留在原处供下一次启动使用。ra_execution_guard 保留未知在途任务，重启不清空；跨主机接管需要独立核实原主机已停止。本机 Linux 容器已测试第二进程拒绝、数据库连接终止、同锁文件、错误锁路径及其他主机拒绝，不能代替正式主机部署验收。
 
 本次 PostgreSQL 测试容器 `ro-agent-postgres-test`、本机端口 `127.0.0.1:55432`、测试数据库 `ro_agent_test` 使用临时数据盘。每例在随机 schema 中运行，结束只清理这个 schema。不要把此容器当生产数据库。
