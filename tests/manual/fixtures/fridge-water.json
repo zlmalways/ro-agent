@@ -1,0 +1,14 @@
+{
+  "robot_id": "mock-fridge-01",
+  "map": "模拟办公区",
+  "duration_seconds": 5,
+  "environment": {
+    "前台": "模拟办公区前台",
+    "充电点": "模拟充电站",
+    "冰箱旁": "模拟办公区冰箱取水处"
+  },
+  "capabilities": {
+    "sim-pick": "模拟抓取演示",
+    "take-bottled-water": "在冰箱旁拿取一瓶瓶装水（模拟技能，须先到达冰箱旁）"
+  }
+}
