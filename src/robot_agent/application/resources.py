@@ -7,11 +7,19 @@ from uuid import uuid4
 from robot_agent.domain.models import ConflictError, ContextSnapshot, DependencyUnavailable, PlanError
 
 
+def _waypoints_match_map(places, current_map):
+    if "reported_map" in places:
+        return places["reported_map"] == current_map["value"]
+    # Old readiness frames stamped every field in a single report with the same time.
+    return places["received_at"] == current_map["received_at"]
+
+
 class Resources:
-    def __init__(self, store, *, freshness_seconds, max_entries):
+    def __init__(self, store, *, freshness_seconds, max_entries, use_reported_waypoints=False):
         self.store = store
         self.freshness_seconds = freshness_seconds
         self.max_entries = max_entries
+        self.use_reported_waypoints = use_reported_waypoints
 
     async def put(self, context, binding_id, kind, entries, source_refs, *, base_version=None):
         if "maintainer" not in context.roles:
@@ -68,8 +76,19 @@ class Resources:
         skills = frozenset(declaration.get("value", ())) if connected and not binding["isolation_reason"] \
             and declaration.get("connection_generation") == generation else frozenset()
         waypoints, skill_refs = {}, {}
-        if environment:
-            for name in fresh("waypoint_names") or ():
+        names = fresh("waypoint_names")
+        environment_labels = environment["entries"] if environment else {}
+        if self.use_reported_waypoints:
+            map_name = fresh("map")
+            if (connected and not binding["isolation_reason"] and isinstance(map_name, str) and map_name.strip()
+                    and isinstance(names, list) and names):
+                if _waypoints_match_map(observations["waypoint_names"], observations["map"]):
+                    for name in names:
+                        if isinstance(name, str) and name.strip():
+                            waypoints[name] = f"robot-waypoint:{binding['binding_id']}:{generation}:{map_name}:{name}"
+            environment_labels = {name: environment_labels[name] for name in waypoints if name in environment_labels}
+        elif environment:
+            for name in names or ():
                 if isinstance(name, str) and name in environment["entries"]:
                     waypoints[name] = f"environment:{binding['binding_id']}:{environment['revision']}:{name}"
         if capability:
@@ -80,9 +99,11 @@ class Resources:
         readiness = {field: fresh(field) for field in ("nav_server_ready", "brain_server_ready", "brain_engine", "busy")
                      if fresh(field) is not None}
         deadline_fields = tuple(readiness) + ("waypoint_names", "brain_skills")
+        if self.use_reported_waypoints and waypoints:
+            deadline_fields += ("map",)
         deadlines = [datetime.fromisoformat(observations[field]["received_at"]) + timedelta(seconds=self.freshness_seconds)
                      for field in deadline_fields if fresh(field) is not None]
         return ContextSnapshot(context.customer_id, binding["binding_id"], generation, skills, waypoints, skill_refs,
                                readiness, str(uuid4()), frozenset(binding["allowed_capabilities"]), observations,
-                               capability["entries"] if capability else {}, environment["entries"] if environment else {}, binding["version"],
+                               capability["entries"] if capability else {}, environment_labels, binding["version"],
                                min(deadlines) if deadlines else None)

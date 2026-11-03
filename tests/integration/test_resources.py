@@ -56,3 +56,44 @@ async def test_resource_does_not_invent_robot_skill(postgres_store):
     snap = await resources.snapshot(ADMIN)
     assert not snap.skills
     assert not snap.waypoints
+
+
+async def test_reported_places_follow_current_map_and_connection(postgres_store, monkeypatch):
+    # The clock can give two separate reports the same timestamp.
+    clock = datetime.now(timezone.utc)
+
+    class SameTick(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return clock
+
+    monkeypatch.setattr("robot_agent.adapters.postgres.datetime", SameTick)
+    resources = Resources(postgres_store, freshness_seconds=60, max_entries=100, use_reported_waypoints=True)
+    binding = {"customer_id": ADMIN.customer_id, "binding_id": "test-binding"}
+
+    async def report(**fields):
+        async with postgres_store.system_unit_of_work() as tx:
+            await tx.update_observations(binding, 1, fields)
+        return await resources.snapshot(ADMIN)
+
+    assert not (await report(connected=True, waypoint_names=["门口"])).waypoints
+    assert not (await report(map="一楼")).waypoints  # Earlier names had no known map.
+    first = await report(waypoint_names=["门口"])
+    assert set(first.waypoints) == {"门口"}
+    assert (await report(map="一楼")).waypoints == first.waypoints
+    assert not (await report(map="二楼")).waypoints
+    assert not (await report(map="一楼")).waypoints  # Switching back still needs a report.
+    second = await report(map="二楼", waypoint_names=["门口"])
+    assert set(second.waypoints) == {"门口"}
+    assert second.waypoints["门口"] != first.waypoints["门口"]
+    assert not (await report(waypoint_names="门口")).waypoints
+    assert not (await report(waypoint_names=[None, "", "  "])).waypoints
+    assert not (await report(connected=False, waypoint_names=["门口"])).waypoints
+
+    stale = (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat()
+    await postgres_store.pool.execute("""UPDATE ra_robot_bindings SET observations =
+        jsonb_set(observations, '{map,received_at}', to_jsonb($1::text))""", stale)
+    assert not (await report(connected=True, waypoint_names=["门口"])).waypoints
+    await report(map="二楼", waypoint_names=["门口"])
+    await postgres_store.pool.execute("UPDATE ra_robot_bindings SET connection_generation=connection_generation+1")
+    assert not (await resources.snapshot(ADMIN)).waypoints

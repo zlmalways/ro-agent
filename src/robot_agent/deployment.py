@@ -41,6 +41,9 @@ def build_app(configuration, *, environment=None):
     dsn = environment.get(database["dsn_env"], "")
     if not dsn:
         raise ValueError("database secret reference is not configured")
+    use_reported_waypoints = configuration.get("resources", {}).get("use_reported_waypoints", False)
+    if not isinstance(use_reported_waypoints, bool):
+        raise ValueError("resources.use_reported_waypoints must be a boolean")
     users, robots = {}, {}
     for row in configuration.get("users", []):
         secret = environment.get(row["token_env"], "")
@@ -70,7 +73,8 @@ def build_app(configuration, *, environment=None):
             async with store.system_unit_of_work() as tx:
                 for row in configuration["robots"]:
                     await tx.provision_binding(row)
-            resources = Resources(store, freshness_seconds=limits["freshness_seconds"], max_entries=limits["max_resource_entries"])
+            resources = Resources(store, freshness_seconds=limits["freshness_seconds"],
+                                  max_entries=limits["max_resource_entries"], use_reported_waypoints=use_reported_waypoints)
             planner = OpenAICompatiblePlanner(load_provider_config(environment) if configuration.get("allow_external_calls") is True else None,
                                               max_response_bytes=limits["provider_response_bytes"])
             asr = DoubaoASR()

@@ -25,6 +25,21 @@ def _snapshot(value):
                               "valid_until": datetime.fromisoformat(value["valid_until"]) if value.get("valid_until") else None})
 
 
+def _record_observations(observations, generation, frame):
+    previous_map = observations.get("map", {}).get("value")
+    map_name = frame.get("map", previous_map)
+    if map_name != previous_map and "waypoint_names" in observations:
+        # A map-only change invalidates the old list, even if the robot switches back.
+        observations["waypoint_names"]["reported_map"] = None
+    instant = datetime.now(timezone.utc).isoformat()
+    for key, value in frame.items():
+        if key not in {"type", "robot_id"}:
+            evidence = {"value": value, "received_at": instant, "connection_generation": generation}
+            if key == "waypoint_names":
+                evidence["reported_map"] = map_name
+            observations[key] = evidence
+
+
 class PostgresStore:
     def __init__(self, pool, *, deployment_id):
         self.pool = pool
@@ -395,11 +410,8 @@ class SystemTaskTransaction(TaskTransaction):
 
     async def activate_binding(self, binding, frame):
         generation = binding["connection_generation"] + 1
-        observations = {key: {"value": value, "received_at": datetime.now(timezone.utc).isoformat(),
-                              "connection_generation": generation}
-                        for key, value in frame.items() if key not in {"type", "robot_id"}}
-        observations["connected"] = {"value": True, "connection_generation": generation,
-                                     "received_at": datetime.now(timezone.utc).isoformat()}
+        observations = {}
+        _record_observations(observations, generation, {**frame, "connected": True})
         await self.connection.execute("""UPDATE ra_robot_bindings SET connection_generation=$1,observations=$2::jsonb,
             version=version+1 WHERE customer_id=$3 AND binding_id=$4 AND version=$5""", generation, _json(observations),
             binding["customer_id"], binding["binding_id"], binding["version"])
@@ -410,10 +422,7 @@ class SystemTaskTransaction(TaskTransaction):
         if stored is None or stored["connection_generation"] != generation:
             return
         observations = json.loads(stored["observations"])
-        instant = datetime.now(timezone.utc).isoformat()
-        for key, value in frame.items():
-            if key not in {"type", "robot_id"}:
-                observations[key] = {"value": value, "received_at": instant, "connection_generation": generation}
+        _record_observations(observations, generation, frame)
         await self.connection.execute("""UPDATE ra_robot_bindings SET observations=$1::jsonb,version=version+1
             WHERE customer_id=$2 AND binding_id=$3 AND connection_generation=$4""", _json(observations),
             binding["customer_id"], binding["binding_id"], generation)
