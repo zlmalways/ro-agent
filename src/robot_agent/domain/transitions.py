@@ -42,7 +42,10 @@ def check_transition(task: Task, command: Command | None, event: RobotEvent, *, 
                 state = "BLOCKED"
             task = replace(task, completed=completed, state=state, reason_code=reason)
         elif outcome == "FAILED":
-            task = replace(task, state="BLOCKED", reason_code="ACTION_FAILED")
+            if task.cancel_requested or task.state == "CANCEL_REQUESTED":
+                task = replace(task, state="CANCELLED", reason_code="")
+            else:
+                task = replace(task, state="BLOCKED", reason_code="ACTION_FAILED")
     commands = tuple(changed if item.command_id == command.command_id else item for item in task.commands)
     return ChangeSet(replace(task, commands=commands, version=task.version + 1), changed, event)
 
