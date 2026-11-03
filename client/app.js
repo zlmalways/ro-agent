@@ -32,7 +32,8 @@ let credential = '',
   currentTask = null,
   page = 'home',
   rows = [],
-  nextBefore = null;
+  nextBefore = null,
+  stateCounts = null;
 let identityEpoch = 0,
   selection = 0,
   historyRequest = 0,
@@ -49,16 +50,21 @@ function node(tag, text, className) {
   if (className) el.className = className;
   return el;
 }
-async function api(path, options = {}) {
-  if (!credential) throw new Error('请先在设置中应用访问凭据。');
+async function api(path, options = {}, token = credential) {
+  if (!token) throw new Error('请先到设置页连接服务。');
+  const epoch = identityEpoch;
   const response = await fetch(base + path, {
     ...options,
     cache: 'no-store',
     headers: {
-      Authorization: 'Bearer ' + credential,
+      Authorization: 'Bearer ' + token,
       ...options.headers
     }
   });
+  if (response.status === 401) {
+    if (epoch === identityEpoch && token === credential) resetIdentity();
+    throw new Error('访问凭据无效，请重新连接服务。');
+  }
   const data = await response.json();
   if (!response.ok) throw new Error(typeof data.detail === 'string' ? data.detail : '请求失败，请检查输入。');
   return data;
@@ -92,10 +98,14 @@ function blankTask() {
 
 function taskRow(row) {
   const el = node('button', '', 'task-row');
-  el.append(node('span', row.goal_text), node('small', new Date(row.created_at).toLocaleString() + ' · ' + (
-    states[row.state] || row.state)));
+  const when = row.created_at ? new Date(row.created_at).toLocaleString() + ' · ' : '';
+  el.append(node('span', row.goal_text), node('small', when + (states[row.state] || row.state)));
   el.onclick = () => openTask(row.task_id);
   return el;
+}
+
+function totalTasks(counts) {
+  return Object.values(counts).reduce((total, value) => total + value, 0);
 }
 
 function renderHistory() {
@@ -104,15 +114,42 @@ function renderHistory() {
       ['recent', rows.slice(0, 5)]
     ]) {
     $(id).replaceChildren(...data.map(taskRow));
-    if (!data.length) $(id).append(node('p', credential ? '当前没有已加载的任务。' : '请先到设置中连接工作台。', 'empty'));
+    if (!data.length) {
+      let message = '请先到设置中连接工作台。';
+      if (credential) message = stateCounts === null ? '尚未取得任务列表。' : '当前没有已加载的任务。';
+      $(id).append(node('p', message, 'empty'));
+    }
   }
   $('more').hidden = nextBefore == null;
-  $('recent-count').textContent = credential ? rows.length : '—';
-  $('waiting-count').textContent = credential ? rows.filter(t => ['NEEDS_CLARIFICATION', 'WAITING_APPROVAL',
-    'BLOCKED'
-  ].includes(t.state)).length : '—';
-  $('active-count').textContent = credential ? rows.filter(t => t.state === 'RUNNING').length : '—';
+  const unknown = credential ? '待同步' : '—';
+  $('recent-count').textContent = stateCounts ? totalTasks(stateCounts) : unknown;
+  $('waiting-count').textContent = stateCounts ? ['NEEDS_CLARIFICATION', 'WAITING_APPROVAL', 'BLOCKED']
+    .reduce((n, state) => n + (stateCounts[state] || 0), 0) : unknown;
+  $('active-count').textContent = stateCounts ? stateCounts.RUNNING || 0 : unknown;
 }
+
+function rememberTask(view, submittedHere) {
+  // A detail can belong to a different user whose plan this user may approve.
+  const previous = rows.find(row => row.task_id === view.task_id);
+  if (previous && previous.version >= view.version) return;
+  if (!previous && !submittedHere) {
+    stateCounts = null;
+  } else {
+    // Update exact totals locally only when the last snapshot covered all rows.
+    // With partial history a replay can return a task outside the loaded pages.
+    if (stateCounts && nextBefore === null && rows.length === totalTasks(stateCounts) &&
+        (!previous || stateCounts[previous.state] > 0)) {
+      if (previous) stateCounts[previous.state]--;
+      stateCounts[view.state] = (stateCounts[view.state] || 0) + 1;
+    } else {
+      stateCounts = null;
+    }
+    if (previous) Object.assign(previous, {state: view.state, version: view.version, goal_text: view.goal_text});
+    else rows.unshift({task_id: view.task_id, state: view.state, version: view.version, goal_text: view.goal_text});
+  }
+  renderHistory();
+}
+
 async function loadHistory(more = false) {
   if (!credential) return;
   const request = ++historyRequest;
@@ -121,6 +158,7 @@ async function loadHistory(more = false) {
     if (request !== historyRequest) return;
     rows = more ? rows.concat(data.tasks) : data.tasks;
     nextBefore = data.next_before;
+    stateCounts = data.state_counts;
     $('notice').textContent = '';
     renderHistory();
   } catch (error) {
@@ -138,6 +176,8 @@ function resetIdentity() {
   blankTask();
   rows = [];
   nextBefore = null;
+  stateCounts = null;
+  $('connection-status').textContent = '尚未连接';
   renderHistory();
   $('robot-fields').replaceChildren();
   $('robot-status').textContent = '请先设置访问凭据。';
@@ -148,13 +188,28 @@ function resetIdentity() {
   conversation(false);
 }
 $('credential').oninput = resetIdentity;
-$('settings-form').onsubmit = event => {
+$('settings-form').onsubmit = async event => {
   event.preventDefault();
   resetIdentity();
-  credential = $('credential').value.trim();
-  if (credential) {
-    location.hash = 'home';
-    if (page === 'home') loadHistory();
+  const epoch = identityEpoch;
+  const candidate = $('credential').value.trim();
+  if (!candidate) {
+    $('notice').textContent = '请输入访问凭据。';
+    return;
+  }
+  $('connection-status').textContent = '正在连接…';
+  try {
+    const identity = await api('/session', {}, candidate);
+    if (epoch !== identityEpoch) return;
+    credential = candidate;
+    $('connection-status').textContent = '已连接 · ' + identity.actor_id;
+    renderHistory();
+    if (page === 'settings') location.hash = 'home';
+    else navigate();
+  } catch (error) {
+    if (epoch !== identityEpoch) return;
+    $('connection-status').textContent = '尚未连接';
+    $('notice').textContent = '连接失败。' + error.message;
   }
 };
 async function loadRobot() {
@@ -190,14 +245,15 @@ async function loadRobot() {
 function navigate() {
   const target = location.hash.slice(1);
   page = Object.hasOwn(pages, target) ? target : 'home';
-  for (const id of Object.keys(pages)) $(id).hidden = page !== id;
+  // Home and fleet display the same single-robot snapshot panel.
+  for (const id of Object.keys(pages)) $(id).hidden = page !== id && !(id === 'robots' && page === 'home');
   document.querySelectorAll('nav a').forEach(a => {
     if (a.hash === '#' + page) a.setAttribute('aria-current', 'page');
     else a.removeAttribute('aria-current');
   });
   $('page-title').textContent = pages[page];
   $('notice').textContent = '';
-  if (page === 'robots') loadRobot();
+  if (page === 'robots' || page === 'home') loadRobot();
   if (page === 'home' || page === 'tasks') loadHistory();
 }
 
@@ -275,6 +331,7 @@ async function write(path, payload, audioFile) {
     });
     if (epoch !== identityEpoch) return;
     pendingWrite = null;
+    rememberTask(view, path === '/tasks' || path === '/tasks/audio');
     if (ticket === selection) renderConversation(view);
     loadHistory();
   } catch (error) {
@@ -394,7 +451,10 @@ setInterval(async () => {
     if (ticket !== selection) return;
     const changed = view.version !== currentTask.version;
     renderConversation(view);
-    if (changed) loadHistory();
+    if (changed) {
+      rememberTask(view, false);
+      loadHistory();
+    }
   } catch (error) {
     if (ticket === selection) $('error').textContent = '任务状态未更新。' + error.message;
   } finally {

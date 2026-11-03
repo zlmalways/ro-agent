@@ -56,6 +56,8 @@ async def put_resource(kind: str, body: ResourceInput, request: Request):
 async def get_snapshot(request: Request):
     context = await web_context(request)
     try:
+        if request.app.state.resources is None:
+            raise DependencyUnavailable("RESOURCES_UNAVAILABLE")
         return asdict(await request.app.state.resources.snapshot(context))
     except DependencyUnavailable as exc:
         raise HTTPException(503, str(exc)) from None

@@ -8,7 +8,7 @@ from pathlib import Path
 import sys
 
 from robot_agent.adapters.identity import ConfiguredIdentity
-from robot_agent.api.resources import router as resources_router
+from robot_agent.api.resources import router as resources_router, web_context
 from robot_agent.api.robot_ws import router as robot_router
 from robot_agent.api.tasks import router as tasks_router
 from robot_agent.api.voice import router as voice_router
@@ -45,6 +45,11 @@ def create_app(*, service=None, identity=None, resources=None, inputs=None):
     @app.exception_handler(PreflightBlocked)
     async def dependency_error(request: Request, exc):
         return JSONResponse(status_code=503, content={"detail": str(exc)})
+
+    @app.get("/api/robot-agent/session")
+    async def session_identity(request: Request):
+        context = await web_context(request)
+        return {"actor_id": context.actor_id}
 
     @app.get("/health")
     async def health():

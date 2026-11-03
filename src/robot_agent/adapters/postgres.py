@@ -77,14 +77,21 @@ class TaskTransaction:
         self.loaded_versions = {}
 
     async def owner_history(self, limit, before):
-        rows = await self.connection.fetch("""
-            SELECT task_id, goal_text, state, reason_code, version, created_at, updated_at, queue_seq
-            FROM ra_tasks
-            WHERE customer_id=$1 AND actor_kind=$2 AND actor_id=$3
-              AND ($4::bigint IS NULL OR queue_seq < $4)
-            ORDER BY queue_seq DESC LIMIT $5""",
+        # Count and page the same owner's rows at one PostgreSQL read snapshot.
+        result = await self.connection.fetchrow("""
+            WITH owned AS NOT MATERIALIZED (
+                SELECT task_id, goal_text, state, reason_code, version, created_at, updated_at, queue_seq
+                FROM ra_tasks WHERE customer_id=$1 AND actor_kind=$2 AND actor_id=$3
+            ), page AS (
+                SELECT * FROM owned WHERE $4::bigint IS NULL OR queue_seq < $4
+                ORDER BY queue_seq DESC LIMIT $5
+            ), counts AS (
+                SELECT state, count(*) AS n FROM owned GROUP BY state
+            )
+            SELECT (SELECT COALESCE(json_agg(page ORDER BY queue_seq DESC), '[]') FROM page) AS tasks,
+                   (SELECT COALESCE(json_object_agg(state, n), '{}') FROM counts) AS state_counts""",
             self.context.customer_id, self.context.actor_kind, self.context.actor_id, before, limit)
-        return [dict(row) for row in rows]
+        return json.loads(result["tasks"]), json.loads(result["state_counts"])
 
     def _check_customer(self, customer_id, actor_id=None, actor_kind=None):
         if self.context is None:

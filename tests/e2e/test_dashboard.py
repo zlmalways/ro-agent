@@ -29,7 +29,7 @@ class RecordingASR:
 async def login(page, token="first"):
     await page.get_by_role("link", name="设置").click()
     await page.get_by_label("访问凭据").fill(token)
-    await page.get_by_role("button", name="应用凭据").click()
+    await page.get_by_role("button", name="连接服务").click()
     await expect(page.locator("#page-title")).to_have_text("首页")
 
 
@@ -45,6 +45,7 @@ async def dashboard(persisted_service):
     service, _ = persisted_service
     users = {key: {"customer_id": "test-customer", "actor_id": key, "roles": ["user", "approver"]}
              for key in ("first", "peer")}
+    users["alias-credential"] = users["peer"]
     asr = RecordingASR()
     app = create_app(service=service, resources=service.resources, identity=ConfiguredIdentity(users=users, robots={}),
                      inputs=InputService(service, asr, max_audio_bytes=8_000_000))
@@ -75,6 +76,60 @@ async def test_refresh_restores_history_only_for_same_identity(dashboard):
     await login(page, "peer")
     await expect(page.locator("#recent")).to_contain_text("没有已加载的任务")
     await expect(page.locator("#task-goal")).to_have_text("")
+
+
+async def test_first_accepted_task_survives_history_refresh_failure(dashboard):
+    page, service, _ = dashboard
+    service.policy.result = "require_confirmation"
+    await expect(page.locator("#recent-count")).to_have_text("0")
+
+    async def fail_history(route):
+        if route.request.method == "GET":
+            await route.abort()
+        else:
+            await route.continue_()
+
+    await page.route("**/api/robot-agent/tasks", fail_history)
+    await submit(page, "first accepted task")
+    await expect(page.locator("#notice")).to_contain_text("未更新")
+    await page.locator("#collapse").click()
+    await expect(page.locator("#recent")).to_contain_text("first accepted task")
+    await expect(page.locator("#recent")).to_contain_text("等待批准")
+    await expect(page.locator("#recent-count")).to_have_text("1")
+    await expect(page.locator("#waiting-count")).to_have_text("1")
+
+
+async def test_home_totals_include_tasks_beyond_first_page(dashboard, tmp_path):
+    page, service, _ = dashboard
+    await service.store.pool.execute("""
+        INSERT INTO ra_tasks(customer_id, actor_kind, actor_id, task_id, unit_id, goal_text, state, version)
+        SELECT 'test-customer','user','first','task-'||i,'unit-'||i,'task '||i,
+               CASE WHEN i=1 THEN 'WAITING_APPROVAL' ELSE 'SUCCEEDED' END,1
+        FROM generate_series(1,31) AS i ORDER BY i""")
+    await page.get_by_role("link", name="任务", exact=True).click()
+    await expect(page.locator("#history button")).to_have_count(30)
+    await page.get_by_role("link", name="首页").click()
+    await expect(page.locator("#recent-count")).to_have_text("31")
+    await expect(page.locator("#waiting-count")).to_have_text("1")
+    await expect(page.get_by_text("test-binding", exact=True)).to_be_visible()
+    await page.screenshot(path=str(tmp_path / "home-with-robot.png"), full_page=True)
+
+
+async def test_home_robot_and_connection_identity(dashboard):
+    page, _, _ = dashboard
+    await expect(page.locator("#connection-status")).to_contain_text("first")
+    await expect(page.get_by_text("test-binding", exact=True)).to_be_visible()
+    await page.get_by_role("link", name="舰队").click()
+    await expect(page.get_by_text("test-binding", exact=True)).to_be_visible()
+    await page.get_by_role("link", name="设置").click()
+    await page.get_by_label("访问凭据").fill("bad-test-credential")
+    await page.get_by_role("button", name="连接服务").click()
+    await expect(page.locator("#page-title")).to_have_text("设置")
+    await expect(page.locator("#notice")).to_contain_text("凭据")
+    await expect(page.locator("#connection-status")).to_contain_text("尚未连接")
+    await expect(page.locator("#robot-fields")).to_be_empty()
+    await login(page, "alias-credential")
+    await expect(page.locator("#connection-status")).to_have_text("已连接 · peer")
 
 
 async def test_network_error_preserves_loaded_history(dashboard):

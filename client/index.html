@@ -12,6 +12,7 @@
     <nav aria-label="工作台导航">
       <a href="#home">首页</a><a href="#tasks">任务</a><a href="#robots">舰队</a><a href="#settings">设置</a>
     </nav>
+    <p id="connection-status" role="status">尚未连接</p>
   </aside>
   <main>
     <header><div><small>ROBOT WORKSPACE</small><h1 id="page-title">首页</h1></div>
@@ -19,7 +20,7 @@
     <p id="notice" role="status"></p>
     <section id="home">
       <h2>任务概览</h2><div class="metrics">
-        <article><span>最近任务</span><strong id="recent-count">—</strong></article>
+        <article><span>全部任务</span><strong id="recent-count">—</strong></article>
         <article><span>需要处理</span><strong id="waiting-count">—</strong></article>
         <article><span>执行中</span><strong id="active-count">—</strong></article>
       </div>
@@ -34,7 +35,7 @@
     <section id="settings" hidden><form id="settings-form" class="card"><h2>连接工作台</h2>
       <label>访问凭据<input id="credential" type="password" autocomplete="off" spellcheck="false"></label>
       <p class="hint">凭据仅在当前页面使用。刷新页面后需重新输入。</p>
-      <button>应用凭据</button></form></section>
+      <button>连接服务</button></form></section>
   </main>
   <button id="dock" aria-expanded="false" aria-controls="conversation">与机器人对话</button>
   <section id="conversation" role="dialog" aria-label="任务对话" hidden>

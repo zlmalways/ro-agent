@@ -92,6 +92,16 @@ summary:focus-visible {
   object-fit: contain
 }
 
+#connection-status {
+  position: absolute;
+  bottom: 12px;
+  left: 16px;
+  right: 16px;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+  font-size: 13px;
+}
+
 .rail-caption,
 header small {
   font-size: 11px;
@@ -343,6 +353,11 @@ summary {
 }
 
 @media(max-width:700px) {
+  #connection-status {
+    position: static;
+    margin: 4px 0 0;
+  }
+
   .rail {
     width: auto;
     position: static;

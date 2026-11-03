@@ -24,7 +24,8 @@ async def test_submit_clarify_approve_observe_result(persisted_service, tmp_path
     service.planner.value = {"outcome": "clarify", "question": "Which test table?", "required_slots": ["location"]}
     identity = ConfiguredIdentity(users={"test-user": {"customer_id": "test-customer", "actor_id": "test-user", "roles": ["user", "approver"]}},
                                   robots={"test-token": {"customer_id": "test-customer", "binding_id": "test-binding", "wire_robot_id": "test-robot"}})
-    app = create_app(service=service, identity=identity, inputs=InputService(service, None, max_audio_bytes=1024))
+    app = create_app(service=service, identity=identity, resources=service.resources,
+                     inputs=InputService(service, None, max_audio_bytes=1024))
     app.state.robot = robot
     async with live_app(app) as base:
         async with connect(base + "/api/voice/robot/ws?robot_id=test-robot", additional_headers={"x-robot-token": "test-token"}, proxy=None) as ws:
@@ -39,7 +40,7 @@ async def test_submit_clarify_approve_observe_result(persisted_service, tmp_path
                 await page.goto(base.replace("ws://", "http://") + "/")
                 await page.get_by_role("link", name="设置").click()
                 await page.get_by_label("访问凭据").fill("test-user")
-                await page.get_by_role("button", name="应用凭据").click()
+                await page.get_by_role("button", name="连接服务").click()
                 await page.get_by_role("button", name="描述你的目标").click()
                 await page.get_by_label("任务指令").fill("test: fetch cup")
                 await page.get_by_role("button", name="提交任务", exact=True).click()

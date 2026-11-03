@@ -515,9 +515,10 @@ class TaskService:
 
     async def history(self, context, *, limit, before):
         async with self.store.unit_of_work(context) as tx:
-            rows = await tx.owner_history(limit + 1, before)
+            rows, state_counts = await tx.owner_history(limit + 1, before)
         page = rows[:limit]
-        return {"tasks": page, "next_before": page[-1]["queue_seq"] if len(rows) > limit else None}
+        return {"tasks": page, "next_before": page[-1]["queue_seq"] if len(rows) > limit else None,
+                "state_counts": state_counts}
 
     async def get(self, context, task_id):
         async with self.store.unit_of_work(context) as tx:
