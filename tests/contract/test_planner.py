@@ -60,3 +60,64 @@ async def test_planner_timeout_is_dependency_failure():
         snapshot = await ResourcesFixture().snapshot(TrustedContext("test-customer", "user", "test-user"))
         with pytest.raises(DependencyUnavailable):
             await planner.plan("test", [], snapshot)
+
+def _relay_config():
+    return load_provider_config({
+        "DEEPLEAP_LLM_PROVIDER": "relay",
+        "RELAY_BASE_URL": "http://relay.test/v1/",
+        "RELAY_MODEL": "test-relay-model",
+        "RELAY_API_KEY": "test-only",
+    })
+
+
+def _message(*parts):
+    return {"type": "message", "role": "assistant", "status": "completed",
+            "content": [{"type": "output_text", "text": part} for part in parts]}
+
+
+@pytest.mark.parametrize("candidate", [
+    {"outcome": "plan", "steps": [{"step_id": "s1", "action": "move_to",
+                                    "args": {"location": "test-table"}, "depends_on": []}]},
+    {"outcome": "clarify", "question": "Where?", "required_slots": ["location"]},
+    {"outcome": "unsupported", "reason": "No matching skill"},
+])
+async def test_relay_uses_responses_and_parses_candidate(candidate):
+    config = _relay_config()
+    assert config.timeout_seconds == 240
+    snapshot = await ResourcesFixture().snapshot(TrustedContext("test-customer", "user", "test-user"))
+    def response(request):
+        assert str(request.url) == "http://relay.test/v1/responses"
+        assert request.headers["authorization"] == "Bearer test-only"
+        body = json.loads(request.content)
+        assert body["model"] == "test-relay-model" and body["store"] is False
+        assert body["text"]["format"]["strict"] is True
+        assert body["text"]["format"]["type"] == "json_schema"
+        content = body["input"][-1]["content"]
+        assert [part["type"] for part in content] == ["input_text"]
+        context = json.loads(content[0]["text"])
+        assert context["answers"] == ["my answer"] and "test-table" in context["waypoints"]
+        assert "customer_id" not in context and "source_refs" not in context
+        formatted = {"steps": [], "reason": "", "question": "", "required_slots": [], **candidate}
+        content = json.dumps(formatted)
+        return httpx.Response(200, json={"status": "completed", "output": [
+            {"type": "reasoning"}, _message(content[:8], content[8:])]})
+    async with httpx.AsyncClient(transport=httpx.MockTransport(response)) as client:
+        result = await OpenAICompatiblePlanner(config, client=client).plan("test", ["my answer"], snapshot)
+    assert result.outcome == candidate["outcome"]
+    if result.steps:
+        assert result.steps[0].args == {"location": "test-table"}
+
+
+@pytest.mark.parametrize("body", [
+    {"status": "incomplete", "output": [_message('{"outcome":"unsupported"}')]},
+    {"status": "completed", "output": [{"type": "message", "role": "assistant", "content": [
+        {"type": "output_text", "text": '{"outcome":"unsupported"}'}, {"type": "refusal"}]}]},
+    {"status": "completed", "output": [_message('{"outcome":"unsupported","approval":true}')]},
+    {"status": "completed", "output": []},
+])
+async def test_relay_rejects_unusable_output(body):
+    snapshot = await ResourcesFixture().snapshot(TrustedContext("test-customer", "user", "test-user"))
+    transport = httpx.MockTransport(lambda request: httpx.Response(200, json=body))
+    async with httpx.AsyncClient(transport=transport) as client:
+        with pytest.raises(PlanError, match="PLANNER_INVALID_OUTPUT"):
+            await OpenAICompatiblePlanner(_relay_config(), client=client).plan("test", [], snapshot)

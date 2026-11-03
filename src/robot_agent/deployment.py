@@ -8,7 +8,7 @@ import sys
 
 import asyncpg
 
-from robot_agent.adapters.asr import DoubaoASR, DoubaoStream
+from robot_agent.adapters.asr import DoubaoASR, DoubaoStream, OpenAIASR
 from robot_agent.adapters.dlv0 import Dlv0Robot
 from robot_agent.adapters.identity import ConfiguredIdentity
 from robot_agent.adapters.llm import OpenAICompatiblePlanner
@@ -21,6 +21,28 @@ from robot_agent.application.task_service import TaskService
 from robot_agent.config import load_provider_config
 from robot_agent.domain.models import ActionCatalog
 from robot_agent.runtime import Runtime, RuntimeOwnership, SubmissionOrderQueue
+
+
+def build_asr(configuration, environment):
+    provider = environment.get("VOICE_ASR_PROVIDER")
+    if configuration.get("allow_external_calls") is not True or provider not in {"doubao", "openai"}:
+        return DoubaoASR()  # Unconfigured ASR fails on use; text tasks can still run.
+    limits = configuration["limits"]
+    timeout = limits.get("asr_timeout")
+    if not isinstance(timeout, (int, float)) or timeout <= 0:
+        raise ValueError("explicit ASR timeout is required")
+    if provider == "openai":
+        return OpenAIASR(
+            api_key=environment.get("VOICE_ASR_OPENAI_API_KEY", "").strip(),
+            model=environment.get("VOICE_ASR_OPENAI_MODEL", "").strip(),
+            timeout_seconds=timeout, max_response_bytes=limits["provider_response_bytes"],
+        )
+    return DoubaoASR(DoubaoStream(
+        api_key=environment.get("VOICE_ASR_DOUBAO_API_KEY", ""),
+        resource_id=environment.get("VOICE_ASR_DOUBAO_RESOURCE_ID", ""),
+        stream_url=environment.get("VOICE_ASR_DOUBAO_STREAM_URL", ""),
+        timeout_seconds=timeout, max_response_bytes=limits["provider_response_bytes"],
+    ))
 
 
 def build_app(configuration, *, environment=None):
@@ -75,15 +97,7 @@ def build_app(configuration, *, environment=None):
             resources = Resources(store, freshness_seconds=limits["freshness_seconds"], max_entries=limits["max_resource_entries"])
             planner = OpenAICompatiblePlanner(load_provider_config(environment) if configuration.get("allow_external_calls") is True else None,
                                               max_response_bytes=limits["provider_response_bytes"])
-            asr = DoubaoASR()
-            if configuration.get("allow_external_calls") is True and environment.get("VOICE_ASR_PROVIDER") == "doubao":
-                if not limits.get("asr_timeout") or limits["asr_timeout"] <= 0:
-                    raise ValueError("explicit ASR timeout is required")
-                provider = DoubaoStream(api_key=environment.get("VOICE_ASR_DOUBAO_API_KEY", ""),
-                                        resource_id=environment.get("VOICE_ASR_DOUBAO_RESOURCE_ID", ""),
-                                        stream_url=environment.get("VOICE_ASR_DOUBAO_STREAM_URL", ""),
-                                        timeout_seconds=limits["asr_timeout"], max_response_bytes=limits["provider_response_bytes"])
-                asr = DoubaoASR(provider)
+            asr = build_asr(configuration, environment)
             owner = RuntimeOwnership(dsn=dsn, deployment_id=deployment["id"], host_id=deployment["host_id"],
                                      lock_path=deployment["lock_path"], advisory_key=deployment["advisory_key"],
                                      schema=database.get("schema", "public")) if enabled else None
