@@ -373,3 +373,21 @@ async def test_wav_inputs_reach_task_service(dashboard, source):
         assert (wav.getframerate(), wav.getnchannels(), wav.getsampwidth()) == (16000, 1, 2)
         assert wav.getnframes() > 0
     assert await service.store.pool.fetchval("SELECT count(*) FROM ra_tasks") == 1
+
+
+async def test_running_task_cancelled_by_robot_ends_in_dashboard(dashboard):
+    page, service, _ = dashboard
+    await submit(page, "去冰箱拿一瓶水")
+    await service.dispatch_next("test-deployment")
+    cmd = service.robot.sent[0]
+    await service.on_robot_event(RobotEvent("started", cmd.customer_id, cmd.robot_binding_id,
+                                           cmd.dispatch_generation, cmd.command_id, "running"))
+    await expect(page.locator("#results")).to_contain_text("机器人正在执行")
+    await page.locator("#cancel").click()
+    await expect(page.locator("#status")).to_have_text("已请求取消，等待反馈")
+    await service.on_robot_event(RobotEvent("stopped", cmd.customer_id, cmd.robot_binding_id,
+                                           cmd.dispatch_generation, cmd.command_id, "failed"))
+    await expect(page.locator("#status")).to_have_text("任务已结束")
+    await expect(page.locator("#results")).to_contain_text("机器人报告失败")
+    await service.dispatch_next("test-deployment")
+    assert len(service.robot.sent) == 1

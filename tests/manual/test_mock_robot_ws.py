@@ -1,64 +1,114 @@
 """Exercise the simulator over real loopback WebSockets, without provider credentials."""
 import asyncio
 import base64
+from contextlib import asynccontextmanager
 import json
 from pathlib import Path
 import wave
 
 import pytest
+from websockets.asyncio.client import ClientConnection
 from websockets.asyncio.server import serve
 
 from robot_agent.protocol.dlv0_schema import parse_frame, ready_frame
 from tests.manual.mock_robot_ws import Simulator, command_session, send_wav, wav_segment
 
 
-async def test_command_session_advertises_and_executes():
-    loop = asyncio.get_running_loop()
-    finished = loop.create_future()
+@asynccontextmanager
+async def connected_simulator(robot):
+    accepted = asyncio.get_running_loop().create_future()
 
     async def peer(ws):
+        accepted.set_result(ws)
+        await ws.wait_closed()
+
+    async with asyncio.timeout(10), serve(peer, "127.0.0.1", 0) as server:
+        url = f"ws://127.0.0.1:{server.sockets[0].getsockname()[1]}/api/voice/robot/ws"
+        client = asyncio.create_task(command_session(url, "test", robot))
         try:
+            ws = await accepted
             assert ws.request.path.endswith("?robot_id=sim-cmd")
             assert ws.request.headers["x-robot-token"] == "test"
             await ws.send(json.dumps(ready_frame("sim-cmd")))
             hello = parse_frame(json.loads(await ws.recv()))
             assert hello["skills"] == ["move_to", "vla_skill"]
             await ws.send(json.dumps(ready_frame("sim-cmd", command_channel=True)))
-            state = parse_frame(json.loads(await ws.recv()))
-            assert state["map"] == "模拟地图" and state["waypoint_names"] == ["前台"]
-            assert state["brain_skills"] == [{"skill_id": "pick"}]
+            report = parse_frame(json.loads(await ws.recv()))
+            assert report["map"] == "模拟地图" and report["waypoint_names"] == ["前台"]
+            assert report["brain_skills"] == [{"skill_id": "pick"}]
+            yield ws
+        finally:
+            server.close()
+            await client
 
-            async def command(key, location):
-                await ws.send(json.dumps({"type": "command", "cmd_id": key, "skill": "move_to",
-                                          "args": {"location": location}}))
 
-            async def status():
-                while True:
-                    frame = parse_frame(json.loads(await ws.recv()))
-                    if frame["type"] == "cmd_status":
-                        return frame
+async def send_move(ws, command_id, location="前台"):
+    await ws.send(json.dumps({"type": "command", "cmd_id": command_id, "skill": "move_to",
+                              "args": {"location": location}}))
 
-            await command("one", "前台")
-            assert (await status())["state"] == "running"
-            assert (await status())["state"] == "succeeded"
-            await command("one", "前台")
-            assert (await status())["state"] == "succeeded"
-            await command("bad", "不存在")
-            assert (await status())["state"] == "failed"
-            await command("stop", "前台")
-            assert (await status())["state"] == "running"
-            await ws.send(json.dumps({"type": "cancel", "cmd_id": "stop"}))
-            assert (await status())["state"] == "failed"
-            finished.set_result(None)
-        except Exception as exc:
-            finished.set_exception(exc)
 
-    async with serve(peer, "127.0.0.1", 0) as server:
-        url = f"ws://127.0.0.1:{server.sockets[0].getsockname()[1]}/api/voice/robot/ws"
-        robot = Simulator("sim-cmd", "模拟地图", ["前台"], ["pick"], 0.1)
-        async with asyncio.timeout(5):
-            await command_session(url, "test", robot)
-            await finished
+async def next_status(ws, command_id):
+    async for raw in ws:
+        frame = parse_frame(json.loads(raw))
+        if frame["type"] == "cmd_status":
+            assert frame["cmd_id"] == command_id
+            return frame
+    raise AssertionError("connection closed before command status")
+
+
+async def test_cancel_stops_only_matching_command_and_replays_its_final_status():
+    robot = Simulator("sim-cmd", "模拟地图", ["前台"], ["pick"], 1.0)
+    async with connected_simulator(robot) as ws:
+        await send_move(ws, "bad", "不存在")
+        assert (await next_status(ws, "bad"))["state"] == "failed"
+        await ws.send(json.dumps({"type": "command", "cmd_id": "bad-skill", "skill": "vla_skill",
+                                  "args": {"skill_id": "missing"}}))
+        assert (await next_status(ws, "bad-skill"))["state"] == "failed"
+
+        await send_move(ws, "move")
+        running = await next_status(ws, "move")
+        assert running["state"] == "running"
+        deadline = robot.finish_at
+        await ws.send(json.dumps({"type": "cancel", "cmd_id": "unrelated"}))
+        await send_move(ws, "move")
+        assert await next_status(ws, "move") == running
+        assert robot.finish_at == deadline
+
+        await ws.send(json.dumps({"type": "cancel", "cmd_id": "move"}))
+        stopped = await next_status(ws, "move")
+        assert (stopped["state"], stopped["detail"]) == ("failed", "cancelled by platform")
+        await asyncio.sleep(max(0, deadline - asyncio.get_running_loop().time()) + 0.02)
+        await send_move(ws, "move")
+        assert await next_status(ws, "move") == stopped
+        assert robot.active is None
+
+
+async def test_cancel_while_sending_success_keeps_success(monkeypatch):
+    sending, release = asyncio.Event(), asyncio.Event()
+    original_send = ClientConnection.send
+
+    async def hold_first_success(connection, message, *args, **kwargs):
+        if json.loads(message).get("state") == "succeeded" and not sending.is_set():
+            sending.set()
+            await release.wait()
+        return await original_send(connection, message, *args, **kwargs)
+
+    monkeypatch.setattr(ClientConnection, "send", hold_first_success)
+    robot = Simulator("sim-cmd", "模拟地图", ["前台"], ["pick"], 0.05)
+    async with connected_simulator(robot) as ws:
+        try:
+            await send_move(ws, "move")
+            assert (await next_status(ws, "move"))["state"] == "running"
+            await sending.wait()
+            await ws.send(json.dumps({"type": "cancel", "cmd_id": "move"}))
+        finally:
+            release.set()
+        success = await next_status(ws, "move")
+        assert success["state"] == "succeeded"
+        assert await next_status(ws, "move") == success
+        await send_move(ws, "move")
+        assert await next_status(ws, "move") == success
+        assert robot.active is None
 
 
 async def test_upload_is_one_wav_frame_on_authenticated_voice_channel(tmp_path):

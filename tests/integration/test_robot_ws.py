@@ -146,3 +146,43 @@ async def test_authenticated_robot_ws_uses_single_read_loop(ws_robot):
             async with asyncio.timeout(3):
                 while (await service.get(CONTEXT, view.task_id)).result_summary[0]["outcome"] != "SUCCEEDED":
                     await asyncio.sleep(0.01)
+
+
+async def test_connection_loss_without_receipt_does_not_repeat_or_start_next_task(ws_robot, postgres_store):
+    service, robot = ws_robot
+    app = FastAPI()
+    app.state.robot = robot
+    app.state.identity = TestRobotIdentity()
+    app.include_router(router)
+
+    async with live_app(app) as base:
+        url = base + "/api/voice/robot/ws?robot_id=test-robot"
+        headers = {"x-robot-token": "test-token"}
+        async with connect(url, additional_headers=headers, proxy=None) as ws:
+            assert json.loads(await ws.recv())["state"] == "ready"
+            await ws.send(json.dumps(HELLO))
+            assert json.loads(await ws.recv())["channel"] == "command"
+            first = await service.submit(CONTEXT, TaskInput("req1", "web", "first", ""), "first")
+            second = await service.submit(CONTEXT, TaskInput("req2", "web", "second", ""), "second")
+            await service.dispatch_next("test-deployment")
+            command = json.loads(await ws.recv())
+            assert command["skill"] == "move_to"
+
+        async with asyncio.timeout(5):
+            while (await service.get(CONTEXT, first.task_id)).reason_code != "RESULT_UNKNOWN":
+                await asyncio.sleep(0.01)
+        async with connect(url, additional_headers=headers, proxy=None) as ws:
+            assert json.loads(await ws.recv())["state"] == "ready"
+            await ws.send(json.dumps({**HELLO, "busy_cmd_id": command["cmd_id"]}))
+            assert json.loads(await ws.recv())["channel"] == "command"
+            await service.dispatch_next("test-deployment")
+            current = await service.get(CONTEXT, first.task_id)
+            assert current.state == "BLOCKED" and current.reason_code == "RESULT_UNKNOWN"
+            assert [(c["command_id"], c["outcome"]) for c in current.result_summary] == [
+                (command["cmd_id"], "RESULT_UNKNOWN")
+            ]
+            assert (await service.get(CONTEXT, second.task_id)).result_summary == ()
+            assert await postgres_store.pool.fetchval("SELECT count(*) FROM ra_commands") == 1
+            assert await postgres_store.pool.fetchval("SELECT task_id FROM ra_execution_guard") == first.task_id
+            with pytest.raises(TimeoutError):
+                await asyncio.wait_for(ws.recv(), timeout=0.1)
