@@ -19,13 +19,25 @@
       <button id="compose">描述你的目标 <kbd>⌘ / Ctrl K</kbd></button></header>
     <p id="notice" role="status"></p>
     <section id="home">
-      <h2>任务概览</h2><div class="metrics">
+      <div class="home-board">
+        <div class="board-column">
+          <section class="board-panel" aria-labelledby="questions-title"><h2 id="questions-title">待回答的问题</h2><div id="home-questions"></div></section>
+          <section class="board-panel" aria-labelledby="approvals-title"><h2 id="approvals-title">待批准的计划</h2><div id="home-approvals"></div></section>
+        </div>
+        <div class="board-column">
+          <section class="board-panel" aria-labelledby="running-title"><h2 id="running-title">正在执行</h2><div id="home-running"></div></section>
+          <section class="board-panel" aria-labelledby="queue-title"><h2 id="queue-title">排队的任务</h2><div id="home-queue"></div></section>
+        </div>
+      </div>
+      <p id="home-feedback" role="status"></p>
+      <p id="home-sync" role="status"></p>
+      <details class="home-archive"><summary>任务统计和最近记录</summary><div class="metrics">
         <article><span>全部任务</span><strong id="recent-count">—</strong></article>
         <article><span>需要处理</span><strong id="waiting-count">—</strong></article>
         <article><span>执行中</span><strong id="active-count">—</strong></article>
       </div>
       <div class="card"><div class="heading"><h2>最近任务</h2><a href="#tasks">查看任务 →</a></div>
-        <div id="recent" class="rows"></div></div>
+        <div id="recent" class="rows"></div></div></details>
     </section>
     <section id="tasks" hidden><div class="card"><div class="heading"><h2>我的任务</h2><button id="refresh-tasks" class="quiet">刷新</button></div>
       <div id="history" class="rows"></div><button id="more" class="quiet" hidden>加载更早任务</button></div>
@@ -37,7 +49,7 @@
       <p class="hint">凭据仅在当前页面使用。刷新页面后需重新输入。</p>
       <button>连接服务</button></form></section>
   </main>
-  <button id="dock" aria-expanded="false" aria-controls="conversation">与机器人对话</button>
+  <button id="dock" aria-label="打开任务对话" aria-expanded="false" aria-controls="conversation"><span class="dock-mark" aria-hidden="true">✦</span>描述你的目标，或与机器人对话… <kbd>Ctrl / ⌘ K</kbd></button>
   <section id="conversation" role="dialog" aria-label="任务对话" hidden>
     <div class="heading"><h2>任务对话</h2><div><button id="new-task" class="quiet">新任务</button> <button id="collapse" class="quiet">收起</button></div></div>
     <div id="task-detail" hidden>
@@ -54,5 +66,5 @@
       <span id="record-status" role="status"></span></details></div>
     <p id="error" role="alert"></p>
   </section>
-  <script src="/client/audio.js" defer></script><script src="/client/app.js" defer></script>
+  <script src="/client/audio.js" defer></script><script src="/client/home.js" defer></script><script src="/client/app.js" defer></script>
 </body></html>

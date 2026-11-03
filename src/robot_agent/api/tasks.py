@@ -64,6 +64,13 @@ async def task_history(request: Request, limit: int = Query(30, ge=1, le=100),
     return await request.app.state.service.history(context, limit=limit, before=before)
 
 
+@router.get("/api/robot-agent/home-tasks")
+async def home_tasks(request: Request):
+    from .resources import web_context
+    context = await web_context(request)
+    return await request.app.state.service.home_tasks(context)
+
+
 @router.get("/api/robot-agent/tasks/{task_id}")
 async def get_task(task_id: str, request: Request):
     auth = request.headers.get("authorization", "")

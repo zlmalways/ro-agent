@@ -352,7 +352,56 @@ summary {
   display: none
 }
 
+.home-board {
+  display: grid;
+  grid-template-columns: minmax(0, 1.08fr) minmax(0, 1fr);
+  gap: 16px;
+  align-items: start;
+}
+.board-column { display: grid; gap: 16px; min-width: 0; }
+.board-panel { background: white; border: 1px solid var(--line); border-radius: 13px; overflow: hidden; }
+.board-panel > h2 { font-size: 16px; margin: 0; padding: 12px 16px; background: #fcfcff; border-bottom: 1px solid var(--line); }
+.board-panel article, .board-panel .empty { margin: 0; padding: 13px 16px; overflow-wrap: anywhere; }
+.board-panel article + article { border-top: 1px solid var(--line); }
+.board-panel h3 { margin: 0 0 6px; }
+.board-panel ol { margin: 6px 0; padding-left: 24px; }
+.board-meta, .board-state { color: var(--muted); font-size: 13px; }
+.board-state { margin-left: 8px; }
+.board-state.current { padding: 2px 6px; border-radius: 6px; color: #216557; background: #e6f3ee; }
+.board-queue-head { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
+.board-queue-head button { flex-shrink: 0; }
+.board-meta { margin: 5px 0; }
+.board-question { padding: 7px 10px; margin: 7px 0; background: var(--tint); border-left: 2px solid #aaa5ce; }
+.board-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
+.home-archive { margin: 14px 0; }
+#home-feedback, #home-sync { color: var(--muted); }
+#home-feedback:empty, #home-sync:empty { display: none; }
+#dock, #conversation {
+  left: calc(194px + clamp(18px, 4vw, 64px));
+  right: clamp(18px, 4vw, 64px);
+  max-width: 1020px;
+  width: auto;
+  margin-inline: auto;
+}
+#dock {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  justify-content: flex-start;
+  text-align: left;
+  background: white;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  color: var(--muted);
+  padding: 10px 16px;
+  z-index: 2;
+}
+.dock-mark { background: var(--tint); color: var(--brand); padding: 2px 8px; border-radius: 6px; }
+#dock kbd { margin-left: auto; }
 @media(max-width:700px) {
+  .home-board { grid-template-columns: 1fr; }
+  #dock, #conversation { left: 12px; right: 12px; }
+
   #connection-status {
     position: static;
     margin: 4px 0 0;

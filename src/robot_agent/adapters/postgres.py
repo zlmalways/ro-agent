@@ -93,6 +93,26 @@ class TaskTransaction:
             self.context.customer_id, self.context.actor_kind, self.context.actor_id, before, limit)
         return json.loads(result["tasks"]), json.loads(result["state_counts"])
 
+    async def home_task_rows(self):
+        # Active rows come from the entire owner's queue, independently of the history cursor.
+        return await self.connection.fetch("""
+            SELECT t.task_id, t.goal_text, t.state, t.reason_code, t.version, t.queue_seq, t.created_at,
+                   t.clarification, t.active_plan_id AS plan_id, t.completed,
+                   p.snapshot->>'robot_binding_id' AS binding_id,
+                   p.snapshot->'capability_labels' AS labels, p.steps,
+                   (SELECT json_agg(json_build_object('step_id', c.step_id, 'outcome', c.outcome,
+                              'dispatch_state', c.dispatch_state, 'robot_binding_id', c.binding_id)
+                              ORDER BY c.created_at, c.command_id)
+                    FROM ra_commands c WHERE c.customer_id=t.customer_id AND c.task_id=t.task_id
+                    AND c.plan_id=t.active_plan_id) AS commands
+            FROM ra_tasks t LEFT JOIN ra_plans p ON p.customer_id=t.customer_id
+                AND p.task_id=t.task_id AND p.plan_id=t.active_plan_id
+            WHERE t.customer_id=$1 AND t.actor_kind=$2 AND t.actor_id=$3
+              AND (t.state IN ('NEEDS_CLARIFICATION','WAITING_APPROVAL','RUNNING',
+                               'CANCEL_REQUESTED','READY','QUEUED')
+                   OR (t.state='BLOCKED' AND t.reason_code='AUTHORIZATION_REQUIRED'))
+            ORDER BY t.queue_seq""", self.context.customer_id, self.context.actor_kind, self.context.actor_id)
+
     def _check_customer(self, customer_id, actor_id=None, actor_kind=None):
         if self.context is None:
             return

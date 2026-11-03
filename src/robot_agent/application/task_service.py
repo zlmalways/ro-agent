@@ -16,6 +16,13 @@ from .preflight import Preflight, approval_covers
 from robot_agent.domain.transitions import uncertain_execution
 
 
+def step_description(action, args, labels):
+    if action == "move_to":
+        return "导航到：" + str(args.get("location", ""))
+    skill_id = str(args.get("skill_id", ""))
+    return "调用技能：" + labels.get(skill_id, skill_id)
+
+
 def task_view(task):
     return TaskView(task.task_id, task.version, task.state, task.reason_code,
                     task.plan.plan_id if task.plan else None, task.clarification, task.result_disputed,
@@ -28,9 +35,7 @@ def task_view(task):
                           for command in task.commands), task.clarification_id,
                     tuple({"step_id": step.step_id, "action": step.action, "args": dict(step.args), "depends_on": step.depends_on,
                            "source_refs": step.source_refs,
-                           "description": ("导航到：" + str(step.args.get("location", "")) if step.action == "move_to"
-                                           else "调用技能：" + task.snapshot.capability_labels.get(str(step.args.get("skill_id", "")),
-                                                                                              str(step.args.get("skill_id", ""))))}
+                           "description": step_description(step.action, step.args, task.snapshot.capability_labels)}
                           for step in task.plan.steps) if task.plan else (), goal_text=task.goal_text)
 
 
@@ -512,6 +517,21 @@ class TaskService:
                     and binding["connection_generation"] == command.dispatch_generation
                     and stored is not None and stored.dispatch_state == "DISPATCHING"
                     and stored.outcome not in {"SUCCEEDED", "FAILED", "RESULT_UNKNOWN"} and current.state == "RUNNING")
+
+    async def home_tasks(self, context):
+        async with self.store.unit_of_work(context) as tx:
+            rows = await tx.home_task_rows()
+        result = []
+        for row in rows:
+            item = dict(row)
+            labels = json.loads(item.pop("labels") or "{}")
+            steps = json.loads(item.pop("steps") or "[]")
+            item["plan_steps"] = [{"step_id": step["step_id"],
+                                   "description": step_description(step["action"], step["args"], labels)}
+                                  for step in steps]
+            item["result_summary"] = json.loads(item.pop("commands") or "[]")
+            result.append(item)
+        return result
 
     async def history(self, context, *, limit, before):
         async with self.store.unit_of_work(context) as tx:

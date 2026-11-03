@@ -22,7 +22,7 @@ browser = ["playwright==1.63.0"]
 where = ["src"]
 
 [tool.setuptools.data-files]
-"share/ro-agent/client" = ["client/index.html", "client/app.js", "client/style.css", "client/audio.js", "client/deepleap-logo.png"]
+"share/ro-agent/client" = ["client/index.html", "client/app.js", "client/style.css", "client/audio.js", "client/home.js", "client/deepleap-logo.png"]
 "share/ro-agent/db/migrations" = ["db/migrations/*.sql"]
 
 [tool.pytest.ini_options]

@@ -44,15 +44,15 @@ async def test_submit_clarify_approve_observe_result(persisted_service, tmp_path
                 await page.get_by_role("button", name="描述你的目标").click()
                 await page.get_by_label("任务指令").fill("test: fetch cup")
                 await page.get_by_role("button", name="提交任务", exact=True).click()
-                await page.get_by_text("Which test table?", exact=True).wait_for()
+                await page.locator("#conversation").get_by_text("Which test table?", exact=True).wait_for()
                 service.planner.value = {"outcome": "plan", "steps": [
                     {"step_id": "s1", "action": "move_to", "args": {"location": "test-table"}, "depends_on": []},
                     {"step_id": "s2", "action": "vla_skill", "args": {"skill_id": "test-pick"}, "depends_on": ["s1"]},
                 ]}
                 await page.get_by_label("澄清回答").fill("test-table")
                 await page.get_by_role("button", name="提交回答", exact=True).click()
-                await page.get_by_role("button", name="批准计划", exact=True).wait_for()
-                await page.get_by_role("button", name="批准计划", exact=True).click()
+                await page.locator("#conversation").get_by_role("button", name="批准计划", exact=True).wait_for()
+                await page.locator("#conversation").get_by_role("button", name="批准计划", exact=True).click()
                 await page.get_by_text("等待执行", exact=True).wait_for()
                 for step in ("move_to", "vla_skill"):
                     await service.dispatch_next("test-deployment")
@@ -62,7 +62,7 @@ async def test_submit_clarify_approve_observe_result(persisted_service, tmp_path
                     async with asyncio.timeout(3):
                         while await service.store.pool.fetchval("SELECT count(*) FROM ra_commands WHERE outcome='SUCCEEDED'") < (1 if step == "move_to" else 2):
                             await asyncio.sleep(0.01)
-                await page.get_by_text("已完成", exact=True).wait_for()
+                await page.locator("#conversation").get_by_text("已完成", exact=True).wait_for()
                 assert await page.get_by_text("机器人报告成功", exact=True).count() == 2
                 assert errors == []
                 await page.screenshot(path=str(tmp_path / "task-completed.png"), full_page=True)

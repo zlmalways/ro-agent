@@ -1,5 +1,7 @@
 """Recovery cases reconstructed from the 2026-10-16 console acceptance record."""
 import asyncio
+from dataclasses import replace
+from unittest.mock import AsyncMock
 import io
 from types import SimpleNamespace
 import wave
@@ -10,6 +12,7 @@ import pytest_asyncio
 
 from robot_agent.adapters.identity import ConfiguredIdentity
 from robot_agent.app import create_app
+from robot_agent.domain.models import TaskInput, TrustedContext, RobotEvent
 from robot_agent.application.input_service import InputService
 from tests.integration.test_robot_ws import live_app
 
@@ -90,9 +93,11 @@ async def test_first_accepted_task_survives_history_refresh_failure(dashboard):
             await route.continue_()
 
     await page.route("**/api/robot-agent/tasks", fail_history)
+    await page.route("**/api/robot-agent/home-tasks", fail_history)
     await submit(page, "first accepted task")
     await expect(page.locator("#notice")).to_contain_text("未更新")
     await page.locator("#collapse").click()
+    await expect(page.locator("#home-approvals")).to_contain_text("first accepted task")
     await expect(page.locator("#recent")).to_contain_text("first accepted task")
     await expect(page.locator("#recent")).to_contain_text("等待批准")
     await expect(page.locator("#recent-count")).to_have_text("1")
@@ -109,10 +114,104 @@ async def test_home_totals_include_tasks_beyond_first_page(dashboard, tmp_path):
     await page.get_by_role("link", name="任务", exact=True).click()
     await expect(page.locator("#history button")).to_have_count(30)
     await page.get_by_role("link", name="首页").click()
+    await expect(page.locator("#home-approvals")).to_contain_text("task 1")
     await expect(page.locator("#recent-count")).to_have_text("31")
     await expect(page.locator("#waiting-count")).to_have_text("1")
     await expect(page.get_by_text("test-binding", exact=True)).to_be_visible()
     await page.screenshot(path=str(tmp_path / "home-with-robot.png"), full_page=True)
+
+
+async def test_home_displays_four_real_workflows_and_actions(dashboard, tmp_path):
+    page, service, _ = dashboard
+    owner = TrustedContext("test-customer", "user", "first")
+    async def create(goal, key, actor=owner):
+        return await service.submit(actor, TaskInput(key, "web", goal, ""), key)
+
+    snapshot = await service.resources.snapshot(owner)
+    service.resources.snapshot = AsyncMock(return_value=replace(
+        snapshot, waypoints={k: "fixture:" + k for k in ("书房书桌", "厨房冰箱旁", "餐桌旁", "玄关")},
+        brain_skills={"place-file": "fixture:place", "take-water": "fixture:take"},
+        capability_labels={"place-file": "放下文件夹", "take-water": "拿一瓶瓶装水"}))
+
+    def plan(location, skill=None):
+        steps = [{"step_id": "s1", "action": "move_to", "args": {"location": location}, "depends_on": []}]
+        if skill:
+            steps.append({"step_id":"s2", "action":"vla_skill", "args":{"skill_id":skill}, "depends_on":["s1"]})
+        return {"outcome":"plan", "steps":steps}
+
+    service.planner.value = plan("书房书桌", "place-file")
+    active = await create("把文件夹送到书房", "active")
+    await service.dispatch_next("test-deployment")
+    cmd = service.robot.sent[0]
+    await service.on_robot_event(RobotEvent("receipt-one", owner.customer_id, cmd.robot_binding_id,
+                                           cmd.dispatch_generation, cmd.command_id, "succeeded"))
+    await service.dispatch_next("test-deployment")
+    current = service.robot.sent[-1]
+    await service.on_robot_event(RobotEvent("receipt-running", owner.customer_id, current.robot_binding_id,
+                                           current.dispatch_generation, current.command_id, "running"))
+    service.planner.value = plan("餐桌旁")
+    await create("去餐桌旁", "wait-a")
+    service.planner.value = plan("玄关")
+    await create("到玄关来", "wait-b")
+    service.planner.value = plan("厨房冰箱旁", "take-water")
+    service.policy.result = "require_confirmation"
+    approval = await create("去冰箱旁拿水", "water")
+    service.planner.value = {"outcome":"clarify", "question":"遥控器要送到哪里？", "required_slots":["location"]}
+    question = await create("把遥控器送过来", "remote")
+    await create("其他用户的私密任务", "private", TrustedContext("test-customer", "user", "peer"))
+    service.planner.value = plan("书房书桌")
+    await page.reload()
+    await login(page)
+    await expect(page.locator("#home-questions")).to_contain_text("遥控器要送到哪里？")
+    await expect(page.locator("#home-approvals")).to_contain_text("厨房冰箱旁")
+    await expect(page.locator("#home-running")).to_contain_text("把文件夹送到书房")
+    await expect(page.locator("#home-running")).to_contain_text("已完成")
+    await expect(page.locator("#home-running")).to_contain_text("放下文件夹")
+    await expect(page.locator("#home-running")).to_contain_text("机器人执行中")
+    queued = page.locator("#home-queue article h3")
+    await expect(queued).to_have_text(["去餐桌旁", "到玄关来"])
+    await expect(page.locator("#home-queue")).to_contain_text("我的上一项：去餐桌旁")
+    await expect(page.locator("#home")).not_to_contain_text("其他用户的私密任务")
+    await page.screenshot(path=str(tmp_path / "four-section-home.png"), full_page=True)
+    await page.set_viewport_size({"width":390, "height":844})
+    assert await page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+    await page.screenshot(path=str(tmp_path / "four-section-mobile.png"), full_page=True)
+    await page.locator("#home-questions").get_by_role("button", name="回答问题").click()
+    await page.get_by_label("澄清回答").fill("书房书桌")
+    await page.locator("#answer-form button").click()
+    await expect(page.locator("#task-detail #status")).to_have_text("等待批准")
+    await page.locator("#collapse").click()
+    await expect(page.locator("#home-questions")).not_to_contain_text("把遥控器送过来")
+    card = page.locator("#home-approvals article").filter(has_text="去冰箱旁拿水")
+    await card.get_by_role("button", name="批准计划").click()
+    await expect(page.locator("#home-queue")).to_contain_text("去冰箱旁拿水")
+    assert (await service.get(owner, approval.task_id)).state == "READY"
+    assert (await service.get(owner, question.task_id)).state == "WAITING_APPROVAL"
+    assert (await service.get(owner, active.task_id)).state == "RUNNING"
+    await service.on_robot_event(RobotEvent("receipt-delivered", owner.customer_id, current.robot_binding_id,
+                                           current.dispatch_generation, current.command_id, "succeeded"))
+    service.policy.result = "allow"
+    await service.dispatch_next("test-deployment")
+    await expect(page.locator("#home-running")).to_contain_text("去餐桌旁", timeout=10000)
+    await expect(page.locator("#home-running")).not_to_contain_text("把文件夹送到书房")
+
+
+async def test_home_approval_cannot_apply_to_a_changed_plan(dashboard):
+    page, service, _ = dashboard
+    owner = TrustedContext("test-customer", "user", "first", frozenset({"approver"}))
+    service.policy.result = "require_confirmation"
+    old = await service.submit(owner, TaskInput("guard", "web", "核对批准版本", ""), "guard")
+    await page.reload()
+    await login(page)
+    card = page.locator("#home-approvals article").filter(has_text=old.goal_text)
+    await expect(card).to_be_visible()
+    # Keep the previously displayed card while another client rejects the plan.
+    await page.route("**/api/robot-agent/home-tasks", lambda route: route.abort())
+    changed = await service.decide(owner, old.task_id, old.version, "reject", "elsewhere", plan_id=old.plan_id)
+    await card.get_by_role("button", name="批准计划").click()
+    await expect(page.locator("#home-feedback")).to_contain_text("核对最新计划")
+    assert (await service.get(owner, old.task_id)).version == changed.version
+    assert service.robot.sent == []
 
 
 async def test_home_robot_and_connection_identity(dashboard):

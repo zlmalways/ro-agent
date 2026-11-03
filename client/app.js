@@ -50,6 +50,17 @@ function node(tag, text, className) {
   if (className) el.className = className;
   return el;
 }
+const board = createHomeBoard({
+  request: () => api('/home-tasks'),
+  openTask,
+  node,
+  approve(task) {
+    // Authorize precisely the plan/version shown on the card.
+    return write('/tasks/' + encodeURIComponent(task.task_id) + '/decisions',
+      {decision: 'approve', plan_id: task.plan_id, expected_version: task.version}, undefined, true);
+  }
+});
+
 async function api(path, options = {}, token = credential) {
   if (!token) throw new Error('请先到设置页连接服务。');
   const epoch = identityEpoch;
@@ -178,6 +189,7 @@ function resetIdentity() {
   nextBefore = null;
   stateCounts = null;
   $('connection-status').textContent = '尚未连接';
+  board.reset();
   renderHistory();
   $('robot-fields').replaceChildren();
   $('robot-status').textContent = '请先设置访问凭据。';
@@ -253,6 +265,7 @@ function navigate() {
   });
   $('page-title').textContent = pages[page];
   $('notice').textContent = '';
+  if (page === 'home' && credential) board.load();
   if (page === 'robots' || page === 'home') loadRobot();
   if (page === 'home' || page === 'tasks') loadHistory();
 }
@@ -282,18 +295,21 @@ function renderConversation(view) {
     $('results').append(item);
   }
 }
-async function openTask(id) {
+async function openTask(id, focusAnswer = false) {
   blankTask();
   const ticket = selection;
   conversation(true);
   try {
     const view = await api('/tasks/' + encodeURIComponent(id));
-    if (ticket === selection) renderConversation(view);
+    if (ticket === selection) {
+      renderConversation(view);
+      if (focusAnswer && view.state === 'NEEDS_CLARIFICATION') $('answer').focus();
+    }
   } catch (error) {
     if (ticket === selection) $('error').textContent = error.message;
   }
 }
-async function write(path, payload, audioFile) {
+async function write(path, payload, audioFile, fromBoard = false) {
   if (writing) return;
   if (!credential) {
     $('error').textContent = '请先在设置中应用访问凭据。';
@@ -331,12 +347,21 @@ async function write(path, payload, audioFile) {
     });
     if (epoch !== identityEpoch) return;
     pendingWrite = null;
-    rememberTask(view, path === '/tasks' || path === '/tasks/audio');
-    if (ticket === selection) renderConversation(view);
+    const submittedHere = path === '/tasks' || path === '/tasks/audio';
+    board.observe(view, submittedHere || rows.some(row => row.task_id === view.task_id));
+    rememberTask(view, submittedHere);
+    if (ticket === selection && !fromBoard) renderConversation(view);
+    if (fromBoard) board.announce('已提交「' + view.goal_text + '」的批准决定，当前状态：' + (states[view.state] || view.state) + '。');
+    if (page === 'home') board.load();
     loadHistory();
   } catch (error) {
     if (epoch === identityEpoch && ticket === selection) {
-      $('error').textContent = error.message + ' · 请求编号 ' + request.key + '。请先查看任务历史。';
+      const message = error.message + ' · 请求编号 ' + request.key + '。请先查看任务历史。';
+      if (fromBoard) {
+        const stale = ['task version changed', 'plan version changed'].includes(error.message);
+        board.announce(stale ? '任务或计划已变更，请核对最新计划后再批准。' : message);
+        board.load();
+      } else $('error').textContent = message;
     }
   } finally {
     if (epoch === identityEpoch) writing = false;
@@ -452,7 +477,9 @@ setInterval(async () => {
     const changed = view.version !== currentTask.version;
     renderConversation(view);
     if (changed) {
+      board.observe(view, rows.some(row => row.task_id === view.task_id));
       rememberTask(view, false);
+      if (page === 'home') board.load();
       loadHistory();
     }
   } catch (error) {
@@ -461,5 +488,9 @@ setInterval(async () => {
     polling = false;
   }
 }, 700);
+setInterval(() => {
+  if (credential && page === 'home' && !document.hidden && !writing) board.load(true);
+}, 4000);
+board.reset();
 renderHistory();
 navigate();
