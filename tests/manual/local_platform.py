@@ -79,11 +79,13 @@ def create_platform():
             admin = TrustedContext(company, "user", "sim-admin", frozenset({"maintainer"}))
             resources = app.state.resources
             if not await resources.read(admin, "environment"):
-                await resources.put(admin, binding, "environment", {"前台": "模拟办公区前台", "充电点": "模拟充电站"},
-                                    ("local-simulator-map",))
+                await resources.put(admin, binding, "environment", {
+                    "前台": "模拟办公区前台", "充电点": "模拟充电站", "冰箱旁": "模拟办公区冰箱取水处",
+                }, ("local-simulator-map",))
             if not await resources.read(admin, "capability"):
-                await resources.put(admin, binding, "capability", {"sim-pick": "模拟抓取演示"},
-                                    ("local-simulator-skills",))
+                await resources.put(admin, binding, "capability", {
+                    "sim-pick": "模拟抓取演示", "take-bottled-water": "在冰箱旁拿取一瓶瓶装水（模拟技能，须先到达冰箱旁）",
+                }, ("local-simulator-skills",))
             voice = VoiceService(inputs=app.state.inputs, output=VoiceOutput(None), allow_woken_audio=True,
                                  max_audio_bytes=app.state.limits["max_audio_bytes"], duplicate_policy="per_turn")
             owner = SimulatorLease(dsn)

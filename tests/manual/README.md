@@ -10,7 +10,7 @@
 
 ```text
 python -m tests.manual.local_platform
-python -m tests.manual.mock_robot_ws serve --skill-id sim-pick
+python -m tests.manual.mock_robot_ws serve --waypoint 前台 --waypoint 充电点 --waypoint 冰箱旁 --skill-id sim-pick --skill-id take-bottled-water --duration 5
 python -m tests.manual.mock_robot_ws send-wav tests/manual/fixtures/front-desk.wav
 ```
 

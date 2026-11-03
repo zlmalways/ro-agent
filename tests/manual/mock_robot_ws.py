@@ -121,7 +121,10 @@ async def command_session(url, token, robot, interval=10):
                     raw = await asyncio.wait_for(ws.recv(), max(0.001, deadline - clock()))
                 except TimeoutError:
                     continue
-                reply = robot.handle(json.loads(raw), clock())
+                frame = json.loads(raw)
+                if frame.get("type") in {"command", "cancel"}:
+                    log.info("received %s", json.dumps(frame, ensure_ascii=False))
+                reply = robot.handle(frame, clock())
                 if reply:
                     await ws.send(json.dumps(reply))
                     log.info("%s %s %s", reply["cmd_id"], reply["state"], reply["detail"])

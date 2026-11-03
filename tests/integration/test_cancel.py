@@ -7,7 +7,8 @@ pytestmark = pytest.mark.integration
 CONTEXT = TrustedContext("test-customer", "user", "test-user")
 
 
-async def test_cancel_success_does_not_claim_physical_stop(persisted_service):
+@pytest.mark.parametrize("terminal_state, outcome", [("succeeded", "SUCCEEDED"), ("failed", "FAILED")])
+async def test_cancel_waits_for_robot_terminal_status(persisted_service, terminal_state, outcome):
     service, robot = persisted_service
     view = await service.submit(CONTEXT, TaskInput("req", "web", "test", ""), "key")
     await service.dispatch_next("test-deployment")
@@ -16,10 +17,11 @@ async def test_cancel_success_does_not_claim_physical_stop(persisted_service):
     assert cancelled.state == "CANCEL_REQUESTED"
     assert cancelled.result_summary[0]["outcome"] == "NONE"
     await service.on_robot_event(RobotEvent("late", CONTEXT.customer_id, "test-binding", 1,
-                                          robot.sent[0].command_id, "succeeded"))
+                                          robot.sent[0].command_id, terminal_state))
     final = await service.get(CONTEXT, view.task_id)
     assert final.state == "CANCELLED"
-    assert final.result_summary[0]["outcome"] == "SUCCEEDED"
+    assert final.result_summary[0]["outcome"] == outcome
+    assert not final.reason_code
     await service.dispatch_next("test-deployment")
     assert len(robot.sent) == 1
 
