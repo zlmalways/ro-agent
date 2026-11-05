@@ -1,4 +1,5 @@
 """Actual local WS server + PostgreSQL + clearly marked protocol simulator."""
+from tests.fixtures.submission import submit_and_plan
 
 import asyncio
 from contextlib import asynccontextmanager
@@ -55,7 +56,7 @@ async def connect_session(robot, **extra):
 async def test_stale_connection_does_not_update(ws_robot, postgres_store):
     service, robot = ws_robot
     old, frames = await connect_session(robot)
-    view = await service.submit(CONTEXT, TaskInput("req", "web", "test", ""), "key")
+    view = await submit_and_plan(service, CONTEXT, TaskInput("req", "web", "test", ""), "key")
     await service.dispatch_next("test-deployment")
     command_id = frames[0]["cmd_id"]
     current, _ = await connect_session(robot, busy_cmd_id=command_id)
@@ -68,7 +69,7 @@ async def test_stale_connection_does_not_update(ws_robot, postgres_store):
 async def test_cross_customer_cmd_rejected(ws_robot, postgres_store):
     service, robot = ws_robot
     owner, frames = await connect_session(robot)
-    view = await service.submit(CONTEXT, TaskInput("req", "web", "test", ""), "key")
+    view = await submit_and_plan(service, CONTEXT, TaskInput("req", "web", "test", ""), "key")
     await service.dispatch_next("test-deployment")
     await postgres_store.pool.execute("""INSERT INTO ra_robot_bindings (customer_id,binding_id,wire_robot_id,enabled)
         VALUES ('other-customer','other-binding','other-robot',true)""")
@@ -90,7 +91,7 @@ async def test_unknown_busy_isolates(ws_robot, postgres_store):
     session, frames = await connect_session(robot, busy_cmd_id="untracked-command")
     assert await postgres_store.pool.fetchval("SELECT isolation_reason FROM ra_robot_bindings") == "UNTRACKED_EXECUTION"
     await robot.handle(session, {"type": "readiness", "busy": False, "nav_server_ready": True})
-    view = await service.submit(CONTEXT, TaskInput("req", "web", "test", ""), "key")
+    view = await submit_and_plan(service, CONTEXT, TaskInput("req", "web", "test", ""), "key")
     await service.dispatch_next("test-deployment")
     assert frames == []
     assert (await service.get(CONTEXT, view.task_id)).result_summary == ()
@@ -135,12 +136,12 @@ async def test_authenticated_robot_ws_uses_single_read_loop(ws_robot):
     app.include_router(router)
     async with live_app(app) as base:
         async with connect(base + "/api/voice/robot/ws?robot_id=test-robot", additional_headers={"x-robot-token": "test-token"}, proxy=None) as ws:
-            assert json.loads(await ws.recv()) == {"type": "state", "state": "ready", "protocol": "dlv/0", "robot_id": "test-robot"}
+            assert json.loads(await asyncio.wait_for(ws.recv(), 5)) == {"type": "state", "state": "ready", "protocol": "dlv/0", "robot_id": "test-robot"}
             await ws.send(json.dumps(HELLO))
-            assert json.loads(await ws.recv())["channel"] == "command"
-            view = await service.submit(CONTEXT, TaskInput("req", "web", "test", ""), "key")
+            assert json.loads(await asyncio.wait_for(ws.recv(), 5))["channel"] == "command"
+            view = await submit_and_plan(service, CONTEXT, TaskInput("req", "web", "test", ""), "key")
             await service.dispatch_next("test-deployment")
-            command = json.loads(await ws.recv())
+            command = json.loads(await asyncio.wait_for(ws.recv(), 5))
             assert command["type"] == "command"
             await ws.send(json.dumps({"type": "cmd_status", "cmd_id": command["cmd_id"], "state": "succeeded"}))
             async with asyncio.timeout(3):
@@ -159,22 +160,22 @@ async def test_connection_loss_without_receipt_does_not_repeat_or_start_next_tas
         url = base + "/api/voice/robot/ws?robot_id=test-robot"
         headers = {"x-robot-token": "test-token"}
         async with connect(url, additional_headers=headers, proxy=None) as ws:
-            assert json.loads(await ws.recv())["state"] == "ready"
+            assert json.loads(await asyncio.wait_for(ws.recv(), 5))["state"] == "ready"
             await ws.send(json.dumps(HELLO))
-            assert json.loads(await ws.recv())["channel"] == "command"
-            first = await service.submit(CONTEXT, TaskInput("req1", "web", "first", ""), "first")
-            second = await service.submit(CONTEXT, TaskInput("req2", "web", "second", ""), "second")
+            assert json.loads(await asyncio.wait_for(ws.recv(), 5))["channel"] == "command"
+            first = await submit_and_plan(service, CONTEXT, TaskInput("req1", "web", "first", ""), "first")
+            second = await submit_and_plan(service, CONTEXT, TaskInput("req2", "web", "second", ""), "second")
             await service.dispatch_next("test-deployment")
-            command = json.loads(await ws.recv())
+            command = json.loads(await asyncio.wait_for(ws.recv(), 5))
             assert command["skill"] == "move_to"
 
         async with asyncio.timeout(5):
             while (await service.get(CONTEXT, first.task_id)).reason_code != "RESULT_UNKNOWN":
                 await asyncio.sleep(0.01)
         async with connect(url, additional_headers=headers, proxy=None) as ws:
-            assert json.loads(await ws.recv())["state"] == "ready"
+            assert json.loads(await asyncio.wait_for(ws.recv(), 5))["state"] == "ready"
             await ws.send(json.dumps({**HELLO, "busy_cmd_id": command["cmd_id"]}))
-            assert json.loads(await ws.recv())["channel"] == "command"
+            assert json.loads(await asyncio.wait_for(ws.recv(), 5))["channel"] == "command"
             await service.dispatch_next("test-deployment")
             current = await service.get(CONTEXT, first.task_id)
             assert current.state == "BLOCKED" and current.reason_code == "RESULT_UNKNOWN"

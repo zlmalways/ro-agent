@@ -3,16 +3,18 @@
 from contextlib import asynccontextmanager
 from copy import deepcopy
 import asyncio
+from uuid import uuid4
 
 from robot_agent.application.task_service import TaskService
-from robot_agent.domain.models import ActionCatalog, CandidatePlan, ContextSnapshot, SendObservation
+from robot_agent.domain.models import ActionCatalog, CandidatePlan, ConflictError, ContextSnapshot, RobotAllocation, SendObservation
 
 
 class MemoryTestStore:
     def __init__(self):
         self.tasks = {}
         self.request_keys = {}
-        self.slot = None
+        self.slots = {}
+        self.deployment_id = "test-deployment"
         self.events = []
         self.decisions = []
         self.robot_events = {}
@@ -21,11 +23,11 @@ class MemoryTestStore:
     @asynccontextmanager
     async def unit_of_work(self, context):
         async with self.lock:
-            backup = deepcopy((self.tasks, self.request_keys, self.slot, self.events, self.decisions, self.robot_events))
+            backup = deepcopy((self.tasks, self.request_keys, self.slots, self.events, self.decisions, self.robot_events))
             try:
                 yield self
             except BaseException:
-                self.tasks, self.request_keys, self.slot, self.events, self.decisions, self.robot_events = backup
+                self.tasks, self.request_keys, self.slots, self.events, self.decisions, self.robot_events = backup
                 raise
 
     def system_unit_of_work(self):
@@ -82,15 +84,43 @@ class MemoryTestStore:
         return [dict(decision.detail) for decision in self.decisions if decision.kind == "approval"
                 and decision.detail["plan_id"] == task.plan.plan_id]
 
-    async def claim_slot(self, deployment_id, task):
-        if self.slot not in (None, task.task_id):
-            return False
-        self.slot = task.task_id
-        return True
+    @property
+    def slot(self):
+        assert len(self.slots) <= 1, "single-robot test used for a multi-robot case"
+        return next(iter(self.slots.values()), None)
 
-    async def release_slot(self, task_id):
-        if self.slot == task_id:
-            self.slot = None
+    async def task_allocation_binding(self, task):
+        allocation = await self.task_allocation(task)
+        return allocation.robot_binding_id if allocation else None
+
+    async def allocations(self, customer_id):
+        return {binding: deepcopy(value) for (customer, binding), value in self.slots.items() if customer == customer_id}
+
+    async def task_allocation(self, task):
+        return next((deepcopy(value) for value in self.slots.values()
+                     if value.customer_id == task.customer_id and value.task_id == task.task_id), None)
+
+    async def prior_waiters(self, task):
+        result = []
+        for prior in self.tasks.values():
+            if prior.task_id == task.task_id:
+                break
+            if prior.customer_id == task.customer_id and prior.state in {"RECEIVED", "QUEUED", "READY"}:
+                result.append(deepcopy(prior))
+        return result
+
+    async def claim_slot(self, deployment_id, task, snapshot):
+        key = (task.customer_id, snapshot.robot_binding_id)
+        if key in self.slots or await self.task_allocation(task) or snapshot.customer_id != task.customer_id:
+            raise ConflictError("allocation scope or occupied robot")
+        allocation = RobotAllocation(task.customer_id, task.task_id, snapshot.robot_binding_id, snapshot, str(uuid4()))
+        self.slots[key] = allocation
+        return allocation
+
+    async def release_allocation(self, allocation):
+        key = (allocation.customer_id, allocation.robot_binding_id)
+        if self.slots.get(key) == allocation:
+            del self.slots[key]
 
 
 class TestPlanner:
@@ -114,13 +144,32 @@ class TestRobot:
 
 
 class TestResources:
-    async def snapshot(self, context):
+    async def list_robots(self, context):
+        from robot_agent.domain.models import RobotSummary
+        return [RobotSummary("test-binding", "test-robot", True, True, "", 1)]
+
+    async def robot_detail(self, context, binding_id):
+        from robot_agent.domain.models import RobotDetail
+        return RobotDetail((await self.list_robots(context))[0], await self.snapshot(context, binding_id), {}, None, None)
+
+    async def online_robot_details(self, context):
+        return [await self.snapshot(context)]
+
+    async def snapshot(self, context, binding_id=None):
+        generation = 1
+        # These tests simulate resources, but must use the current connection
+        # generation when they exercise the real PostgreSQL/WS adapters.
+        if getattr(self, "store", None) is not None:
+            async with self.store.system_unit_of_work() as tx:
+                binding = await tx.get_binding(context.customer_id, binding_id or "test-binding")
+            if binding:
+                generation = binding["connection_generation"]
         return ContextSnapshot(
-            customer_id=context.customer_id, robot_binding_id="test-binding", generation=1,
+            customer_id=context.customer_id, robot_binding_id="test-binding", generation=generation,
             skills=frozenset({"move_to", "vla_skill"}),
             waypoints={"test-table": "environment:v1:table"},
             brain_skills={"test-pick": "capabilities:v1:pick"},
-            readiness={"nav_server_ready": True, "brain_server_ready": True, "brain_engine": "ready"},
+            readiness={"busy": False, "nav_server_ready": True, "brain_server_ready": True, "brain_engine": "ready"},
             snapshot_id="test-snapshot", allowed_actions=frozenset({"move_to", "vla_skill"}),
         )
 

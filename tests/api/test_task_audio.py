@@ -1,3 +1,4 @@
+from tests.fixtures.submission import submit_and_plan
 from types import SimpleNamespace
 
 from fastapi import FastAPI
@@ -27,8 +28,15 @@ class ASRFixture:
 async def test_audio_and_text_share_submit(persisted_service):
     service, robot = persisted_service
     inputs = InputService(service, ASRFixture(), max_audio_bytes=1024)
-    text = await service.submit(CONTEXT, TaskInput("req", "web", "test: fetch cup", ""), "text-key")
+    text = await submit_and_plan(service, CONTEXT, TaskInput("req", "web", "test: fetch cup", ""), "text-key")
     audio = await inputs.audio(CONTEXT, b"test audio fixture", "audio/wav", "audio-key")
+    assert audio.state == "RECEIVED"
+    await service.schedule_pending("test-deployment", task_id=audio.task_id)
+    audio = await service.get(CONTEXT, audio.task_id)
+    assert text.state == "READY" and audio.state == "QUEUED" and audio.plan_id is None
+    await service.cancel(CONTEXT, text.task_id, text.version, "release-text")
+    await service.schedule_pending("test-deployment")
+    audio = await service.get(CONTEXT, audio.task_id)
     assert audio.plan_id and text.plan_id
     assert audio.state == text.state == "READY"
     assert robot.sent == []
@@ -49,7 +57,7 @@ async def test_unavailable_provider_never_creates_executable_task(persisted_serv
     service, robot = persisted_service
     service.planner = OpenAICompatiblePlanner(None, client=None, max_response_bytes=4096)
     with pytest.raises(DependencyUnavailable):
-        await service.submit(CONTEXT, TaskInput("req", "web", "test", ""), "key")
+        await submit_and_plan(service, CONTEXT, TaskInput("req", "web", "test", ""), "key")
     await service.dispatch_next("test-deployment")
     assert robot.sent == []
 
@@ -65,7 +73,7 @@ async def test_multipart_audio_uses_same_task_service(persisted_service):
         result = await client.post("/api/robot-agent/tasks/audio", files={"audio": ("test.wav", b"fixture", "audio/wav")},
                                    headers={"Authorization": "Bearer test-token", "Idempotency-Key": "audio-key"})
         assert result.status_code == 202
-        assert result.json()["state"] == "READY"
+        assert result.json()["state"] == "RECEIVED"
         assert robot.sent == []
 
 

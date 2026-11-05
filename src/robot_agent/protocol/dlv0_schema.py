@@ -1,6 +1,7 @@
 """Selected dlv/0 contract from deepleap_agent@73918bee; see docs/protocol-provenance.md."""
 
 from robot_agent.domain.models import PlanError
+from robot_agent.domain.robot_report import RobotReportError, validate_report_value
 
 
 PROTOCOL = "dlv/0"
@@ -50,4 +51,11 @@ def parse_frame(value):
         fields = TELEMETRY_FIELDS
     else:
         raise PlanError("unsupported robot frame")
+    if kind in {"hello", "readiness"}:
+        try:
+            for key in fields:
+                if key in value:
+                    validate_report_value(key, value[key])
+        except RobotReportError as exc:
+            raise PlanError(str(exc)) from None
     return {"type": kind, **{key: value[key] for key in fields if key in value}}

@@ -24,9 +24,15 @@ class OwnerFixture:
 async def test_runtime_retries_scanning_after_dependency_failure():
     class ServiceFixture:
         calls = 0
+        def raise_background_error(self):
+            pass
+        async def close_work(self):
+            pass
         async def expire_commands(self, deployment_id):
             pass
-        async def dispatch_next(self, deployment_id):
+        async def schedule_pending(self, deployment_id, *, wait_for_plan):
+            pass
+        async def dispatch_next(self, deployment_id, *, wait_for_send):
             self.calls += 1
             if self.calls == 1:
                 raise DependencyUnavailable("test resources temporarily unavailable")

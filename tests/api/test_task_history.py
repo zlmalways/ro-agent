@@ -20,6 +20,7 @@ async def test_history_scopes_orders_and_pages(persisted_service):
             response = await client.post(path, json={"text": f"goal {index}"},
                                          headers={"Authorization": f"Bearer {token}", "Idempotency-Key": str(index)})
             assert response.status_code == 202
+            await service.schedule_pending("test-deployment", task_id=response.json()["task_id"])
         headers = {"Authorization": "Bearer mine"}
         first = await client.get(path, params={"limit": 1}, headers=headers)
         assert first.status_code == 200

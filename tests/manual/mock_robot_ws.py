@@ -14,6 +14,7 @@ from websockets.asyncio.client import connect
 from websockets.exceptions import ConnectionClosed, WebSocketException
 
 log = logging.getLogger("mock_robot")
+DEFAULT_REPORT_INTERVAL = 10.0
 
 
 def connection(url, token, robot_id):
@@ -57,7 +58,7 @@ class Simulator:
     def readiness(self):
         return {"type": "readiness", "executor": "simulator", "busy": self.active is not None,
                 "map": self.map_name, "waypoints": len(self.waypoints), "waypoint_names": self.waypoints,
-                "nav_server_ready": True, "skill_server_ready": bool(self.skill_ids),
+                "preload": "loaded", "nav_server_ready": True, "skill_server_ready": bool(self.skill_ids),
                 "brain_server_ready": bool(self.skill_ids), "brain_engine": "ready" if self.skill_ids else "off",
                 "brain_skills": [{"skill_id": key} for key in self.skill_ids]}
 
@@ -96,14 +97,16 @@ class Simulator:
         return reply
 
 
-async def command_session(url, token, robot, interval=10):
+async def command_session(url, token, robot, interval=DEFAULT_REPORT_INTERVAL):
+    if not 0 < interval < float("inf"):
+        raise ValueError("report interval must be positive and finite")
     clock = asyncio.get_running_loop().time
     async with connection(url, token, robot.robot_id) as ws:
         await ready(ws, robot.robot_id)
         await ws.send(json.dumps(robot.hello()))
         await ready(ws, robot.robot_id, command=True)
         log.info("command connected: %s map=%s waypoints=%s", robot.robot_id, robot.map_name, robot.waypoints)
-        next_report = clock()
+        next_report = clock() + interval
         try:
             while True:
                 now = clock()
@@ -111,7 +114,6 @@ async def command_session(url, token, robot, interval=10):
                     result = robot.finish("succeeded", "simulated action complete")
                     await ws.send(json.dumps(result))
                     log.info("%s %s", result["cmd_id"], result["state"])
-                    next_report = now
                 if now >= next_report:
                     await ws.send(json.dumps(robot.readiness()))
                     next_report = now + interval
@@ -127,7 +129,6 @@ async def command_session(url, token, robot, interval=10):
                 if reply:
                     await ws.send(json.dumps(reply))
                     log.info("%s %s %s", reply["cmd_id"], reply["state"], reply["detail"])
-                    next_report = clock()
         except ConnectionClosed as exc:
             if exc.rcvd is None or exc.rcvd.code not in (1000, 1001):
                 raise
@@ -136,10 +137,10 @@ async def command_session(url, token, robot, interval=10):
                 robot.finish("failed", "simulated action stopped on disconnect")
 
 
-async def serve_robot(url, token, robot):
+async def serve_robot(url, token, robot, interval=DEFAULT_REPORT_INTERVAL):
     while True:
         try:
-            await command_session(url, token, robot)
+            await command_session(url, token, robot, interval=interval)
         except (OSError, TimeoutError, WebSocketException) as exc:
             log.warning("command connection unavailable: %s", exc)
         await asyncio.sleep(3)
@@ -188,6 +189,8 @@ def main():
     serve.add_argument("--waypoint", action="append")
     serve.add_argument("--skill-id", action="append", default=[])
     serve.add_argument("--duration", type=float, default=1.0)
+    serve.add_argument("--report-interval", type=float, default=DEFAULT_REPORT_INTERVAL,
+                       help="state report period; first report after this interval (default: 10 seconds)")
     upload = sub.add_parser("send-wav")
     upload.add_argument("--voice-id", default="mock-fridge-01-voice")
     upload.add_argument("wav", type=Path)
@@ -201,7 +204,9 @@ def main():
             if not 0 < args.duration <= 3600:
                 parser.error("--duration must be between 0 and 3600 seconds")
             robot = Simulator(args.robot_id, args.map, args.waypoint or ["前台", "充电点"], args.skill_id, args.duration)
-            asyncio.run(serve_robot(args.url, token, robot))
+            if not 0 < args.report_interval < float("inf"):
+                parser.error("--report-interval must be positive and finite")
+            asyncio.run(serve_robot(args.url, token, robot, interval=args.report_interval))
         else:
             asyncio.run(send_wav(args.url, token, args.voice_id, args.wav))
     except KeyboardInterrupt:

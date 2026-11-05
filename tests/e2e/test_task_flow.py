@@ -1,3 +1,4 @@
+from tests.fixtures.submission import submit_and_plan, planning_loop
 import asyncio
 import json
 
@@ -27,7 +28,7 @@ async def test_submit_clarify_approve_observe_result(persisted_service, tmp_path
     app = create_app(service=service, identity=identity, resources=service.resources,
                      inputs=InputService(service, None, max_audio_bytes=1024))
     app.state.robot = robot
-    async with live_app(app) as base:
+    async with planning_loop(service), live_app(app) as base:
         async with connect(base + "/api/voice/robot/ws?robot_id=test-robot", additional_headers={"x-robot-token": "test-token"}, proxy=None) as ws:
             await ws.recv()
             await ws.send(json.dumps(HELLO))
@@ -41,7 +42,7 @@ async def test_submit_clarify_approve_observe_result(persisted_service, tmp_path
                 await page.get_by_role("link", name="设置").click()
                 await page.get_by_label("访问凭据").fill("test-user")
                 await page.get_by_role("button", name="连接服务").click()
-                await page.get_by_role("button", name="描述你的目标").click()
+                await page.locator("#sidebar-new").click()
                 await page.get_by_label("任务指令").fill("test: fetch cup")
                 await page.get_by_role("button", name="提交任务", exact=True).click()
                 await page.locator("#conversation").get_by_text("Which test table?", exact=True).wait_for()
@@ -53,7 +54,7 @@ async def test_submit_clarify_approve_observe_result(persisted_service, tmp_path
                 await page.get_by_role("button", name="提交回答", exact=True).click()
                 await page.locator("#conversation").get_by_role("button", name="批准计划", exact=True).wait_for()
                 await page.locator("#conversation").get_by_role("button", name="批准计划", exact=True).click()
-                await page.get_by_text("等待执行", exact=True).wait_for()
+                await page.locator("#status").get_by_text("等待执行", exact=True).wait_for()
                 for step in ("move_to", "vla_skill"):
                     await service.dispatch_next("test-deployment")
                     command = json.loads(await asyncio.wait_for(ws.recv(), 3))
@@ -73,13 +74,13 @@ async def test_event_replay_after_lost_notification(persisted_service):
     from robot_agent.domain.models import TaskInput, TrustedContext
     service, _ = persisted_service
     identity = ConfiguredIdentity(users={"test": {"customer_id": "test-customer", "actor_id": "test-user", "roles": []}}, robots={})
-    view = await service.submit(TrustedContext("test-customer", "user", "test-user"), TaskInput("req", "web", "test", ""), "key")
+    view = await submit_and_plan(service, TrustedContext("test-customer", "user", "test-user"), TaskInput("req", "web", "test", ""), "key")
     app = create_app(service=service, identity=identity)
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app), base_url="http://test") as client:
         first = await client.get(f"/api/robot-agent/tasks/{view.task_id}/events?after=0", headers={"Authorization": "Bearer test"})
         assert first.status_code == 200
-        assert [event["seq"] for event in first.json()["events"]] == [1, 2]
+        assert [event["seq"] for event in first.json()["events"]] == [1, 2, 3]
         await service.dispatch_next("test-deployment")
-        replay = await client.get(f"/api/robot-agent/tasks/{view.task_id}/events?after=2", headers={"Authorization": "Bearer test"})
+        replay = await client.get(f"/api/robot-agent/tasks/{view.task_id}/events?after=3", headers={"Authorization": "Bearer test"})
         assert replay.status_code == 200
         assert [event["event_type"] for event in replay.json()["events"]] == ["command_prepared", "dispatching", "send_observed"]

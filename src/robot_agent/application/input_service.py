@@ -10,7 +10,7 @@ class InputService:
         self.asr = asr
         self.max_audio_bytes = max_audio_bytes
 
-    async def audio(self, context, audio, content_type, request_key):
+    async def audio(self, context, audio, content_type, request_key, *, wait_for_plan=False):
         if not audio or len(audio) > self.max_audio_bytes:
             raise PlanError("AUDIO_INVALID")
         if not request_key:
@@ -22,8 +22,7 @@ class InputService:
                 if existing["request_digest"] != digest:
                     raise ConflictError("audio request key content conflict")
                 if existing["state"] == "COMPLETE":
-                    from .task_service import task_view
-                    return task_view(await tx.load_task(existing["result_task_id"]))
+                    return await self.service.view_in_transaction(tx, await tx.load_task(existing["result_task_id"]))
                 if existing["state"] == "PROCESSING":
                     raise DependencyUnavailable("INPUT_PROCESSING")
                 if existing["state"] == "FAILED":
@@ -46,7 +45,8 @@ class InputService:
                 await tx.finish_input(context, request_key, text, provider_ref)
         if not text:
             raise PlanError("ASR_EMPTY")
-        view = await self.service.submit(context, TaskInput(input_id, "audio", text, input_id), input_id)
+        view = await self.service.submit(context, TaskInput(input_id, "audio", text, input_id), input_id,
+                                         wait_for_plan=wait_for_plan)
         async with self.service.store.unit_of_work(context) as tx:
             await tx.finish_input(context, request_key, text, provider_ref, view.task_id)
         return view

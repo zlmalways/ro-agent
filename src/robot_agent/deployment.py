@@ -49,12 +49,20 @@ def build_app(configuration, *, environment=None):
         secret = environment.get(row["token_env"], "")
         if secret:
             users[secret] = {key: value for key, value in row.items() if key != "token_env"}
+    bindings = set()
+    missing_credentials = set()
     for row in configuration.get("robots", []):
+        key = (row["customer_id"], row["binding_id"])
+        if key in bindings:
+            raise ValueError("duplicate robot binding")
+        bindings.add(key)
         secret = environment.get(row["token_env"], "")
         if secret:
+            if secret in robots:
+                raise ValueError("duplicate robot credential")
             robots[secret] = {key: value for key, value in row.items() if key != "token_env"}
-    if len(configuration.get("robots", [])) != 1:
-        raise ValueError("first release requires exactly one explicitly provisioned robot")
+        else:
+            missing_credentials.add(key)
     identity = ConfiguredIdentity(users=users, robots=robots)
     policy_config = configuration.get("policy", {})
     policy = ConfiguredPolicy(identity, version=policy_config.get("version", ""), actions=policy_config.get("actions", {}),
@@ -71,10 +79,11 @@ def build_app(configuration, *, environment=None):
             store = PostgresStore(pool, deployment_id=deployment["id"])
             await store.migrate()
             async with store.system_unit_of_work() as tx:
-                for row in configuration["robots"]:
+                for row in configuration.get("robots", []):
                     await tx.provision_binding(row)
             resources = Resources(store, freshness_seconds=limits["freshness_seconds"],
-                                  max_entries=limits["max_resource_entries"], use_reported_waypoints=use_reported_waypoints)
+                                  max_entries=limits["max_resource_entries"], use_reported_waypoints=use_reported_waypoints,
+                                  missing_credentials=missing_credentials)
             planner = OpenAICompatiblePlanner(load_provider_config(environment) if configuration.get("allow_external_calls") is True else None,
                                               max_response_bytes=limits["provider_response_bytes"])
             asr = DoubaoASR()
@@ -96,12 +105,12 @@ def build_app(configuration, *, environment=None):
                                   command_timeout_seconds=limits["command_timeout"])
             robot = Dlv0Robot(service=service, write_gate=owner, max_frame_bytes=limits["max_frame_bytes"])
             service.robot = robot
+            resources.connected_robots = robot.connected_robots
             app.state.service, app.state.resources, app.state.robot = service, resources, robot
             app.state.inputs = InputService(service, asr, max_audio_bytes=limits["max_audio_bytes"])
-            if owner:
-                runtime = Runtime(owner=owner, service=service, deployment_id=deployment["id"], scan_interval=limits["scan_interval"])
-                await runtime.start()
-                app.state.runtime = runtime
+            runtime = Runtime(owner=owner, service=service, deployment_id=deployment["id"], scan_interval=limits["scan_interval"])
+            await runtime.start()
+            app.state.runtime = runtime
             yield
         finally:
             try:

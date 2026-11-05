@@ -3,7 +3,7 @@ import base64
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
-from robot_agent.domain.models import PlanError
+from robot_agent.domain.models import DependencyUnavailable, PlanError
 from robot_agent.protocol.dlv0_schema import ready_frame
 
 
@@ -21,6 +21,9 @@ async def robot_ws(ws: WebSocket):
     robot_id = ws.query_params.get("robot_id", "")
     try:
         binding = await identity.resolve_robot(ws.headers.get("x-robot-token", ""), robot_id)
+    except DependencyUnavailable:
+        await ws.close(code=1013)
+        return
     except PermissionError:
         await ws.close(code=4401)
         return

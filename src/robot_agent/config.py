@@ -16,11 +16,13 @@ class ProviderConfig:
 def load_provider_config(env=None):
     env = os.environ if env is None else env
     selected = (env.get("DEEPLEAP_LLM_PROVIDER") or "").strip().lower()
-    if selected not in {"gpt", "deepseek"}:
+    if selected not in {"gpt", "deepseek", "relay"}:
         return None
-    if selected == "gpt":
-        return ProviderConfig("gpt", env.get("GPT_BASE_URL", "").strip(), env.get("GPT_API_KEY", "").strip(),
-                              env.get("GPT_MODEL", "").strip(), float(env.get("GPT_TIMEOUT_S", "30")))
-    return ProviderConfig("deepseek", env.get("DEEPSEEK_BASE_URL", "").strip(),
-                          env.get("DEEPSEEK_API_KEY", "").strip(), env.get("DEEPSEEK_MODEL", "").strip(),
-                          float(env.get("DEEPSEEK_TIMEOUT_S", "30")))
+    prefix = selected.upper()
+    return ProviderConfig(
+        selected,
+        env.get(f"{prefix}_BASE_URL", "").strip(),
+        env.get(f"{prefix}_API_KEY", "").strip(),
+        env.get(f"{prefix}_MODEL", "").strip(),
+        float(env.get(f"{prefix}_TIMEOUT_S", "240" if selected == "relay" else "30")),
+    )

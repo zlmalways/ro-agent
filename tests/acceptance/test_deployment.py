@@ -9,6 +9,7 @@ import httpx
 import pytest
 
 from robot_agent.deployment import build_app
+from tests.fixtures.submission import wait_for_task
 
 
 pytestmark = pytest.mark.integration
@@ -24,8 +25,13 @@ async def test_explicit_deployment_keeps_execution_disabled_without_approved_hos
             health = await client.get("/health")
             assert health.status_code == 200
             assert health.json()["execution_enabled"] is False
-            assert (await client.post("/api/robot-agent/tasks", json={"text": "test"},
-                                     headers={"Authorization": "Bearer test-only-user-token", "Idempotency-Key": "key"})).status_code == 503
+            response = await client.post("/api/robot-agent/tasks", json={"text": "test"},
+                                         headers={"Authorization": "Bearer test-only-user-token", "Idempotency-Key": "key"})
+            assert response.status_code == 202
+            assert response.json()["state"] == "RECEIVED"
+            client.headers['Authorization'] = 'Bearer test-only-user-token'
+            view = await wait_for_task(client, response.json()['task_id'])
+            assert view['reason_code'] == 'NO_ONLINE_ROBOT' and view['state'] == 'BLOCKED'
             assert app.state.service.ownership is None
 
 

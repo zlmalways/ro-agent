@@ -1,3 +1,4 @@
+from tests.fixtures.submission import submit_and_plan
 from datetime import datetime, timezone
 
 import pytest
@@ -25,7 +26,7 @@ async def test_current_deny_overrides_approval(persisted_service):
     service, robot = persisted_service
     context = TrustedContext("test-customer", "user", "test-user")
     service.policy.result = "require_confirmation"
-    view = await service.submit(context, TaskInput("req", "web", "test", ""), "key")
+    view = await submit_and_plan(service, context, TaskInput("req", "web", "test", ""), "key")
     approved = await service.decide(context, view.task_id, view.version, "approve", "decision-key")
     service.policy.result = "deny"
     await service.dispatch_next("test-deployment")
@@ -37,7 +38,7 @@ async def test_revoked_approval_prevents_dispatch(persisted_service, postgres_st
     service, robot = persisted_service
     context = TrustedContext("test-customer", "user", "test-user")
     service.policy.result = "require_confirmation"
-    view = await service.submit(context, TaskInput("req", "web", "test", ""), "key")
+    view = await submit_and_plan(service, context, TaskInput("req", "web", "test", ""), "key")
     await service.decide(context, view.task_id, view.version, "approve", "decision-key")
     await postgres_store.pool.execute("UPDATE ra_decisions SET revoked_at=$1 WHERE kind='approval'", datetime.now(timezone.utc))
     await service.dispatch_next("test-deployment")
@@ -48,11 +49,11 @@ async def test_changed_resource_blocks_without_replacing_planned_target(persiste
     from dataclasses import replace
     service, robot = persisted_service
     context = TrustedContext("test-customer", "user", "test-user")
-    view = await service.submit(context, TaskInput("req", "web", "test", ""), "key")
+    view = await submit_and_plan(service, context, TaskInput("req", "web", "test", ""), "key")
     original = service.resources.snapshot
 
-    async def changed_snapshot(context):
-        return replace(await original(context), waypoints={"test-table": "environment:v2:table"})
+    async def changed_snapshot(context, binding_id=None):
+        return replace(await original(context, binding_id), waypoints={"test-table": "environment:v2:table"})
 
     service.resources.snapshot = changed_snapshot
     await service.dispatch_next("test-deployment")
@@ -65,9 +66,9 @@ async def test_approval_cannot_clear_unknown_result(persisted_service):
     from robot_agent.domain.models import ConflictError
     service, robot = persisted_service
     context = TrustedContext("test-customer", "user", "test-user")
-    view = await service.submit(context, TaskInput("req", "web", "test", ""), "key")
+    view = await submit_and_plan(service, context, TaskInput("req", "web", "test", ""), "key")
     await service.dispatch_next("test-deployment")
-    await service.recover("test-deployment")
+    await service.on_robot_disconnected({"customer_id": context.customer_id, "binding_id": "test-binding"}, 1)
     blocked = await service.get(context, view.task_id)
     with pytest.raises(ConflictError):
         await service.decide(context, view.task_id, blocked.version, "approve", "decision-key")

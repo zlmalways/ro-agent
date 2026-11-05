@@ -1,3 +1,4 @@
+from tests.fixtures.submission import submit_and_plan
 import pytest
 
 from robot_agent.runtime import SubmissionOrderQueue
@@ -13,7 +14,7 @@ INPUT = TaskInput("req", "web", "test", "")
 async def test_missing_queue_policy_never_dequeues(persisted_service):
     service, robot = persisted_service
     service.queue_policy = None
-    view = await service.submit(CONTEXT, INPUT, "key")
+    view = await submit_and_plan(service, CONTEXT, INPUT, "key")
     await service.dispatch_next("test-deployment")
     assert robot.sent == []
     assert (await service.get(CONTEXT, view.task_id)).result_summary == ()
@@ -21,7 +22,7 @@ async def test_missing_queue_policy_never_dequeues(persisted_service):
 
 async def test_expired_approval_waits_and_does_not_repeat_completed_steps(persisted_service):
     service, robot = persisted_service
-    view = await service.submit(CONTEXT, INPUT, "key")
+    view = await submit_and_plan(service, CONTEXT, INPUT, "key")
     await service.dispatch_next("test-deployment")
     await service.on_robot_event(RobotEvent("success", CONTEXT.customer_id, "test-binding", 1,
                                           robot.sent[0].command_id, "succeeded"))
@@ -38,10 +39,11 @@ async def test_expired_approval_waits_and_does_not_repeat_completed_steps(persis
 async def test_two_tasks_release_robot_in_submission_order(persisted_service, cancel_first):
     service, robot = persisted_service
     service.queue_policy = SubmissionOrderQueue()
-    first = await service.submit(CONTEXT, INPUT, "first")
-    second = await service.submit(CONTEXT, INPUT, "second")
+    first = await submit_and_plan(service, CONTEXT, INPUT, "first")
+    second = await submit_and_plan(service, CONTEXT, INPUT, "second")
 
     async def finish_step(task_id, skill, terminal_state):
+        await service.schedule_pending("test-deployment")
         await service.dispatch_next("test-deployment")
         cmd = robot.sent[-1]
         assert (cmd.task_id, cmd.wire_skill) == (task_id, skill)

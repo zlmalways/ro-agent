@@ -1,4 +1,5 @@
 """P0 only: real business code with explicitly isolated external test doubles."""
+from tests.fixtures.submission import submit_and_plan
 
 import pytest
 
@@ -12,7 +13,7 @@ CONTEXT = TrustedContext("test-customer", "user", "test-user")
 @pytest.mark.asyncio
 async def test_minimal_flow_completes_from_matching_feedback():
     service, robot, store = build_service()
-    view = await service.submit(CONTEXT, TaskInput("req", "web", "test: fetch cup", ""), "key")
+    view = await submit_and_plan(service, CONTEXT, TaskInput("req", "web", "test: fetch cup", ""), "key")
     assert view.state == "READY"
     assert robot.sent == []
     await service.dispatch_next("test-deployment")
@@ -44,7 +45,7 @@ async def test_minimal_flow_completes_from_matching_feedback():
 async def test_invalid_plan_never_dispatches(action, args):
     plan = {"outcome": "plan", "steps": [{"step_id": "s1", "action": action, "args": args, "depends_on": []}]}
     service, robot, _ = build_service(plan)
-    view = await service.submit(CONTEXT, TaskInput("req", "web", "test", ""), "key")
+    view = await submit_and_plan(service, CONTEXT, TaskInput("req", "web", "test", ""), "key")
     assert view.state == "FAILED"
     await service.dispatch_next("test-deployment")
     assert robot.sent == []
@@ -53,7 +54,7 @@ async def test_invalid_plan_never_dispatches(action, args):
 @pytest.mark.asyncio
 async def test_clarification_never_dispatches():
     service, robot, _ = build_service({"outcome": "clarify", "steps": [], "question": "Which test table?", "required_slots": ["location"]})
-    view = await service.submit(CONTEXT, TaskInput("req", "web", "test", ""), "key")
+    view = await submit_and_plan(service, CONTEXT, TaskInput("req", "web", "test", ""), "key")
     assert view.state == "NEEDS_CLARIFICATION"
     await service.dispatch_next("test-deployment")
     assert robot.sent == []
@@ -62,7 +63,7 @@ async def test_clarification_never_dispatches():
 @pytest.mark.asyncio
 async def test_denied_policy_never_dispatches():
     service, robot, _ = build_service(policy_result="deny")
-    view = await service.submit(CONTEXT, TaskInput("req", "web", "test", ""), "key")
+    view = await submit_and_plan(service, CONTEXT, TaskInput("req", "web", "test", ""), "key")
     assert view.state == "FAILED"
     await service.dispatch_next("test-deployment")
     assert robot.sent == []
@@ -71,7 +72,7 @@ async def test_denied_policy_never_dispatches():
 @pytest.mark.asyncio
 async def test_wrong_robot_feedback_does_not_finish_task():
     service, robot, _ = build_service()
-    view = await service.submit(CONTEXT, TaskInput("req", "web", "test", ""), "key")
+    view = await submit_and_plan(service, CONTEXT, TaskInput("req", "web", "test", ""), "key")
     await service.dispatch_next("test-deployment")
     command = robot.sent[0]
     await service.on_robot_event(RobotEvent("forged", "other-customer", "test-binding", 1, command.command_id, "succeeded"))
@@ -82,7 +83,7 @@ async def test_wrong_robot_feedback_does_not_finish_task():
 async def test_explicit_plan_limit_rejects_long_candidate():
     service, robot, _ = build_service()
     service.max_plan_steps = 1
-    result = await service.submit(CONTEXT, TaskInput("req", "web", "test", ""), "key")
+    result = await submit_and_plan(service, CONTEXT, TaskInput("req", "web", "test", ""), "key")
     assert result.state == "FAILED"
     await service.dispatch_next("test-deployment")
     assert robot.sent == []

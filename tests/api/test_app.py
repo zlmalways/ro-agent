@@ -26,5 +26,5 @@ async def test_composed_app_uses_supplied_real_store_service(persisted_service):
         response = await client.post("/api/robot-agent/tasks", json={"text": "test"},
                                      headers={"Authorization": "Bearer test", "Idempotency-Key": "key"})
         assert response.status_code == 202
-        assert response.json()["state"] == "READY"
+        assert response.json()["state"] == "RECEIVED"
         assert robot.sent == []

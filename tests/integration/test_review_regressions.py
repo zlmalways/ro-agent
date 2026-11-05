@@ -1,4 +1,5 @@
 """Regressions from the one independent review; real PG and production adapters."""
+from tests.fixtures.submission import submit_and_plan
 
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
@@ -40,7 +41,7 @@ async def test_cancel_intent_survives_disconnect_and_replayed_success(persisted_
     robot = Dlv0Robot(service=service, write_gate=WriteFixture(), max_frame_bytes=8192)
     service.robot = robot
     session, frames = await connect_session(robot)
-    view = await service.submit(USER, INPUT, "key")
+    view = await submit_and_plan(service, USER, INPUT, "key")
     await service.dispatch_next("test-deployment")
     current = await service.get(USER, view.task_id)
     await service.cancel(USER, view.task_id, current.version, "cancel")
@@ -59,7 +60,7 @@ async def test_cancel_intent_survives_disconnect_and_replayed_success(persisted_
 async def test_formal_cancel_policy_works_and_rejects_stranger(persisted_service):
     service, _ = persisted_service
     identity = configured_policy(service)
-    view = await service.submit(USER, INPUT, "key")
+    view = await submit_and_plan(service, USER, INPUT, "key")
     app = create_app(service=service, identity=identity, inputs=InputService(service, None, max_audio_bytes=1024))
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app), base_url="http://test") as client:
         result = await client.post(f"/api/robot-agent/tasks/{view.task_id}/cancel", json={"expected_version": view.version},
@@ -71,7 +72,7 @@ async def test_formal_cancel_policy_works_and_rejects_stranger(persisted_service
 async def test_independent_approver_can_read_and_approve_only_same_customer(persisted_service):
     service, _ = persisted_service
     identity = configured_policy(service)
-    view = await service.submit(USER, INPUT, "key")
+    view = await submit_and_plan(service, USER, INPUT, "key")
     app = create_app(service=service, identity=identity, inputs=InputService(service, None, max_audio_bytes=1024))
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app), base_url="http://test") as client:
         path = f"/api/robot-agent/tasks/{view.task_id}"
@@ -85,7 +86,7 @@ async def test_independent_approver_can_read_and_approve_only_same_customer(pers
 
 async def test_prepared_approval_resumes_same_command_once(persisted_service, postgres_store):
     service, robot = persisted_service
-    view = await service.submit(USER, INPUT, "key")
+    view = await submit_and_plan(service, USER, INPUT, "key")
     calls = 0
 
     async def policy_changes(context, plan, approvals):
@@ -117,8 +118,9 @@ async def connected_formal_service(service, store):
     service.resources = await formal_resources(store)
     robot = Dlv0Robot(service=service, write_gate=WriteFixture(), max_frame_bytes=8192)
     service.robot = robot
+    service.resources.connected_robots = robot.connected_robots
     session, frames = await connect_session(robot)
-    await robot.handle(session, {"type": "readiness", "nav_server_ready": True, "brain_server_ready": True,
+    await robot.handle(session, {"type": "readiness", "busy": False, "nav_server_ready": True, "brain_server_ready": True,
                                  "brain_engine": "ready", "waypoint_names": ["test-table"], "brain_skills": [{"skill_id": "test-pick"}]})
     return robot, session, frames
 
@@ -126,7 +128,7 @@ async def connected_formal_service(service, store):
 async def test_latest_readiness_invalidates_physical_write(persisted_service, postgres_store):
     service, _ = persisted_service
     robot, session, frames = await connected_formal_service(service, postgres_store)
-    await service.submit(USER, INPUT, "key")
+    await submit_and_plan(service, USER, INPUT, "key")
     original_send = robot.send
 
     async def change_before_send(command):
@@ -142,7 +144,7 @@ async def test_latest_approval_revocation_invalidates_physical_write(persisted_s
     service, _ = persisted_service
     robot, session, frames = await connected_formal_service(service, postgres_store)
     service.policy.result = "require_confirmation"
-    view = await service.submit(USER, INPUT, "key")
+    view = await submit_and_plan(service, USER, INPUT, "key")
     await service.decide(USER, view.task_id, view.version, "approve", "approve")
     original_send = robot.send
 
@@ -158,7 +160,7 @@ async def test_latest_approval_revocation_invalidates_physical_write(persisted_s
 async def test_resource_version_change_during_write_check_invalidates_send(persisted_service, postgres_store):
     service, _ = persisted_service
     robot, session, frames = await connected_formal_service(service, postgres_store)
-    await service.submit(USER, INPUT, "key")
+    await submit_and_plan(service, USER, INPUT, "key")
     original = service.preflight.check
     async def change_after_validation(context, plan, snapshot, phase="admission", approvals=()):
         result = await original(context, plan, snapshot, phase, approvals)
@@ -174,7 +176,7 @@ async def test_resource_version_change_during_write_check_invalidates_send(persi
 async def test_reconnect_during_prepared_check_requires_current_evidence(persisted_service, postgres_store):
     service, _ = persisted_service
     robot, session, frames = await connected_formal_service(service, postgres_store)
-    await service.submit(USER, INPUT, "key")
+    await submit_and_plan(service, USER, INPUT, "key")
     original = service.preflight.check
     new_frames = []
     calls = 0
@@ -205,7 +207,7 @@ async def test_hello_skills_remain_valid_in_current_connection(persisted_service
 async def test_command_deadline_marks_unknown_and_keeps_slot(persisted_service, postgres_store):
     service, robot = persisted_service
     service.command_timeout_seconds = 30
-    view = await service.submit(USER, INPUT, "key")
+    view = await submit_and_plan(service, USER, INPUT, "key")
     await service.dispatch_next("test-deployment")
     await postgres_store.pool.execute("UPDATE ra_commands SET dispatch_started_at=clock_timestamp()-interval '60 seconds'")
     await service.expire_commands("test-deployment")
@@ -226,13 +228,13 @@ async def test_snapshot_failure_records_blocked_phase_and_same_key_can_retry(per
 
     service.resources.snapshot = unavailable
     with pytest.raises(DependencyUnavailable):
-        await service.submit(USER, INPUT, "same-key")
+        await submit_and_plan(service, USER, INPUT, "same-key")
     record = await postgres_store.pool.fetchrow("SELECT task_id,state,reason_code,resume_phase FROM ra_tasks")
     assert record["state"] == "BLOCKED"
     assert record["reason_code"] == "ROBOT_BINDING_UNAVAILABLE"
     assert record["resume_phase"] == "PLANNING"
     service.resources.snapshot = original
-    result = await service.submit(USER, INPUT, "same-key")
+    result = await submit_and_plan(service, USER, INPUT, "same-key")
     assert result.task_id == record["task_id"]
     assert result.state == "READY"
     assert await postgres_store.pool.fetchval("SELECT count(*) FROM ra_tasks") == 1

@@ -5,20 +5,22 @@
   <title>DeepLeap · 机器人控制台</title>
   <link rel="icon" href="/client/deepleap-logo.png"><link rel="stylesheet" href="/client/style.css">
 </head>
-<body>
+<body class="chat-open">
   <aside class="rail">
     <a class="brand" href="#home"><img src="/client/deepleap-logo.png" alt=""><strong>DeepLeap</strong></a>
+    <button id="sidebar-new" class="rail-new">＋ 新任务</button>
     <div class="rail-caption">机器人工作台</div>
     <nav aria-label="工作台导航">
       <a href="#home">首页</a><a href="#tasks">任务</a><a href="#robots">舰队</a><a href="#settings">设置</a>
     </nav>
+    <div class="thread-section"><div class="rail-caption">最近对话</div><div id="thread-history"></div></div>
     <p id="connection-status" role="status">尚未连接</p>
   </aside>
   <main>
     <header><div><small>ROBOT WORKSPACE</small><h1 id="page-title">首页</h1></div>
       <button id="compose">描述你的目标 <kbd>⌘ / Ctrl K</kbd></button></header>
     <p id="notice" role="status"></p>
-    <section id="home">
+    <section id="home" hidden>
       <div class="home-board">
         <div class="board-column">
           <section class="board-panel" aria-labelledby="questions-title"><h2 id="questions-title">待回答的问题</h2><div id="home-questions"></div></section>
@@ -43,28 +45,44 @@
       <div id="history" class="rows"></div><button id="more" class="quiet" hidden>加载更早任务</button></div>
       <form id="lookup-form" class="card inline"><label>任务编号<input id="lookup" required></label><button>查询任务</button></form></section>
     <section id="robots" hidden><div class="card"><div class="heading"><h2>机器人资料</h2><button id="refresh-robot" class="quiet">刷新资料</button></div>
+      <p class="hint">选择机器人查看资料，不会改变任务的执行机器人。</p><div id="robot-list" class="robot-list" aria-label="已登记机器人"></div>
       <p id="robot-status" role="status">请先设置访问凭据。</p><dl id="robot-fields"></dl></div></section>
     <section id="settings" hidden><form id="settings-form" class="card"><h2>连接工作台</h2>
       <label>访问凭据<input id="credential" type="password" autocomplete="off" spellcheck="false"></label>
       <p class="hint">凭据仅在当前页面使用。刷新页面后需重新输入。</p>
       <button>连接服务</button></form></section>
+    <section id="conversation" role="region" aria-label="任务对话">
+      <div class="conversation-heading"><h2>任务对话</h2><div><button id="new-task" class="quiet">新任务</button> <button id="collapse" class="quiet">收起</button></div></div>
+      <p id="chat-access-note" role="status">尚未连接，请先<a href="#settings">连接工作台</a>再发送任务。</p>
+      <div id="chat-empty"><h2>有什么需要机器人帮忙？</h2><p>把想做的事说清楚，就从这里开始。</p></div>
+      <div id="task-detail" hidden>
+        <div class="user-message"><div id="task-goal"></div><small id="sent-status">已发送</small></div>
+        <div class="assistant-message">
+          <span class="assistant-mark" aria-hidden="true">✦</span>
+          <div class="assistant-content">
+            <p class="status-line" role="status"><span id="status" class="badge"></span></p>
+            <p id="task-robots" class="hint"></p><p id="reason"></p><p id="question"></p>
+            <form id="answer-form" hidden><label>澄清回答<input id="answer" required></label><button>提交回答</button></form>
+            <div id="decisions" hidden><button id="approve">批准计划</button> <button id="reject" class="quiet">拒绝计划</button></div>
+            <div id="execution-detail" hidden><h3>执行计划</h3><ol id="plan"></ol><h3>机器人执行反馈</h3><div id="results"></div></div>
+            <details id="task-reference"><summary>任务记录</summary><small id="task-id"></small></details>
+          </div>
+        </div>
+      </div>
+      <div class="chat-footer">
+        <div id="active-composer" class="chat-composer" hidden>
+          <p id="composer-message">任务进行中，可以随时停止</p>
+          <div class="composer-actions"><small id="stop-hint">停止后不再继续这个任务</small><button id="cancel"><span aria-hidden="true">■</span> 停止</button><button id="followup-new" hidden>新任务</button></div>
+        </div>
+        <form id="submit-form" class="chat-composer"><label class="sr-only" for="goal">任务指令</label><textarea id="goal" rows="2" placeholder="描述你想让机器人做的事…" required></textarea><div class="composer-actions"><small>Enter 发送 · Shift + Enter 换行</small><button id="send" aria-label="提交任务" disabled>发送 ↑</button></div></form>
+        <div id="voice-input"><details><summary>语音输入</summary>
+          <label>语音文件<input id="audio" type="file" accept="audio/wav,.wav"></label>
+          <button id="audio-submit" class="quiet">上传语音任务</button> <button id="record" class="quiet">开始录音</button>
+          <span id="record-status" role="status"></span></details></div>
+        <p id="error" role="alert"></p><button id="retry-submit" class="quiet" hidden>重试确认提交结果</button>
+      </div>
+    </section>
   </main>
-  <button id="dock" aria-label="打开任务对话" aria-expanded="false" aria-controls="conversation"><span class="dock-mark" aria-hidden="true">✦</span>描述你的目标，或与机器人对话… <kbd>Ctrl / ⌘ K</kbd></button>
-  <section id="conversation" role="dialog" aria-label="任务对话" hidden>
-    <div class="heading"><h2>任务对话</h2><div><button id="new-task" class="quiet">新任务</button> <button id="collapse" class="quiet">收起</button></div></div>
-    <div id="task-detail" hidden>
-      <strong id="task-goal"></strong><p><span id="status" class="badge"></span> <small id="task-id"></small></p>
-      <p id="reason"></p><p id="question"></p><form id="answer-form" hidden><label>澄清回答<input id="answer" required></label><button>提交回答</button></form>
-      <div id="decisions" hidden><button id="approve">批准计划</button> <button id="reject" class="quiet">拒绝计划</button></div>
-      <h3>执行计划</h3><ol id="plan"></ol><h3>机器人执行反馈</h3><div id="results"></div>
-      <button id="cancel" class="danger" hidden>取消任务</button>
-    </div>
-    <form id="submit-form"><label>任务指令<textarea id="goal" rows="2" placeholder="例如，帮我拿杯水" required></textarea></label><button id="send">提交任务</button></form>
-    <div id="voice-input"><details><summary>语音输入</summary>
-      <label>语音文件<input id="audio" type="file" accept="audio/wav,.wav"></label>
-      <button id="audio-submit" class="quiet">上传语音任务</button> <button id="record" class="quiet">开始录音</button>
-      <span id="record-status" role="status"></span></details></div>
-    <p id="error" role="alert"></p>
-  </section>
+  <button id="dock" hidden aria-label="打开任务对话" aria-expanded="false" aria-controls="conversation"><span class="dock-mark" aria-hidden="true">✦</span>描述你的目标，或与机器人对话… <kbd>Ctrl / ⌘ K</kbd></button>
   <script src="/client/audio.js" defer></script><script src="/client/home.js" defer></script><script src="/client/app.js" defer></script>
 </body></html>

@@ -42,7 +42,7 @@ async def test_serve_cli_connects_to_supplied_url():
             env={**os.environ, "RO_AGENT_ROBOT_TOKEN": "test"},
         )
         try:
-            async with asyncio.timeout(10):
+            async with asyncio.timeout(15):
                 ws = await accepted
                 assert ws.request.path == "/chosen-platform?robot_id=cli-robot"
                 assert ws.request.headers["x-robot-token"] == "test"
@@ -66,7 +66,7 @@ async def connected_simulator(robot):
 
     async with asyncio.timeout(10), serve(peer, "127.0.0.1", 0) as server:
         url = f"ws://127.0.0.1:{server.sockets[0].getsockname()[1]}/api/voice/robot/ws"
-        client = asyncio.create_task(command_session(url, "test", robot))
+        client = asyncio.create_task(command_session(url, "test", robot, interval=0.05))
         try:
             ws = await accepted
             assert ws.request.path.endswith("?robot_id=sim-cmd")

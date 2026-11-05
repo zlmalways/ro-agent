@@ -1,5 +1,6 @@
+from tests.fixtures.submission import wait_for_task
 import asyncio
-from contextlib import asynccontextmanager, suppress
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 import json
 import os
@@ -12,7 +13,7 @@ from robot_agent.adapters.llm import OpenAICompatiblePlanner
 from robot_agent.config import ProviderConfig
 from robot_agent.deployment import build_app
 from tests.integration.test_robot_ws import live_app
-from tests.manual.mock_robot_ws import Simulator, command_session
+from tests.manual.mock_robot_ws import Simulator, connection, ready
 
 
 pytestmark = pytest.mark.integration
@@ -21,13 +22,13 @@ pytestmark = pytest.mark.integration
 @asynccontextmanager
 async def reporting_robot(base):
     robot = Simulator("test-robot", "一楼", ["门口"], ["拿水", "测试技能"], 0.1)
-    client = asyncio.create_task(command_session(base + "/api/voice/robot/ws", "device", robot, interval=300))
-    try:
+    # Single captured snapshot for expiry tests; periodic behavior is tested separately.
+    async with connection(base + "/api/voice/robot/ws", "device", robot.robot_id) as ws:
+        await ready(ws, robot.robot_id)
+        await ws.send(json.dumps(robot.hello()))
+        await ready(ws, robot.robot_id, command=True)
+        await ws.send(json.dumps(robot.readiness()))
         yield
-    finally:
-        client.cancel()
-        with suppress(asyncio.CancelledError):
-            await client
 
 
 @pytest.mark.parametrize("enabled", [False, True], ids=["default", "reported"])
@@ -65,7 +66,7 @@ async def test_reported_waypoints_in_web_and_planning(configuration, postgres_st
             response = await web.post("/api/robot-agent/tasks", headers={"Idempotency-Key": str(uuid4())},
                                       json={"text": target})
             response.raise_for_status()
-            return response.json()
+            return await wait_for_task(web, response.json()["task_id"])
 
         async with asyncio.timeout(5):
             while "waypoint_names" not in (await snapshot())["readiness_evidence"]:
@@ -86,6 +87,10 @@ async def test_reported_waypoints_in_web_and_planning(configuration, postgres_st
         if enabled:
             assert task["plan_steps"][0]["source_refs"] == [shown["waypoints"]["门口"]]
             assert "仅登记" not in prompts[-1]["environment_labels"]
+            cancelled = await web.post(f"/api/robot-agent/tasks/{task['task_id']}/cancel",
+                                       json={"expected_version": task["version"]},
+                                       headers={"Idempotency-Key": "release-first-plan"})
+            assert cancelled.status_code == 200 and cancelled.json()["state"] == "CANCELLED"
         else:
             assert task["reason_code"] == "PLAN_INVALID"
 

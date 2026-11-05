@@ -37,11 +37,11 @@ def resource_kind(kind):
 
 
 @router.post("/api/robot-agent/resources/{kind}/versions", status_code=201)
-async def put_resource(kind: str, body: ResourceInput, request: Request):
+async def put_resource(kind: str, body: ResourceInput, request: Request, binding_id: str | None = None):
     context = await web_context(request)
     try:
         resources = request.app.state.resources
-        binding_id = await resources.binding_for(context)
+        binding_id = binding_id if binding_id is not None else await resources.binding_for(context)
         return await resources.put(context, binding_id, resource_kind(kind), body.entries, tuple(body.source_refs),
                                    base_version=body.base_version)
     except PermissionError as exc:
@@ -53,17 +53,41 @@ async def put_resource(kind: str, body: ResourceInput, request: Request):
 
 
 @router.get("/api/robot-agent/resources/snapshot")
-async def get_snapshot(request: Request):
+async def get_snapshot(request: Request, binding_id: str | None = None):
     context = await web_context(request)
     try:
         if request.app.state.resources is None:
             raise DependencyUnavailable("RESOURCES_UNAVAILABLE")
-        return asdict(await request.app.state.resources.snapshot(context))
+        return asdict(await request.app.state.resources.snapshot(context, binding_id))
     except DependencyUnavailable as exc:
         raise HTTPException(503, str(exc)) from None
 
 
 @router.get("/api/robot-agent/resources/{kind}")
-async def get_resource(kind: str, request: Request):
+async def get_resource(kind: str, request: Request, binding_id: str | None = None):
     context = await web_context(request)
-    return await request.app.state.resources.read(context, resource_kind(kind))
+    try:
+        return await request.app.state.resources.read(context, resource_kind(kind), binding_id)
+    except PermissionError as exc:
+        raise HTTPException(403, str(exc)) from None
+    except DependencyUnavailable as exc:
+        raise HTTPException(503, str(exc)) from None
+
+
+@router.get("/api/robot-agent/robots")
+async def list_robots(request: Request):
+    context = await web_context(request)
+    if request.app.state.resources is None:
+        raise DependencyUnavailable("RESOURCES_UNAVAILABLE")
+    return [asdict(row) for row in await request.app.state.resources.list_robots(context)]
+
+
+@router.get("/api/robot-agent/robots/{binding_id}")
+async def robot_detail(binding_id: str, request: Request):
+    context = await web_context(request)
+    try:
+        if request.app.state.resources is None:
+            raise DependencyUnavailable("RESOURCES_UNAVAILABLE")
+        return asdict(await request.app.state.resources.robot_detail(context, binding_id))
+    except PermissionError as exc:
+        raise HTTPException(403, str(exc)) from None

@@ -112,6 +112,15 @@ class ContextSnapshot:
 
 
 @dataclass(frozen=True)
+class RobotAllocation:
+    customer_id: str
+    task_id: str
+    robot_binding_id: str
+    snapshot: ContextSnapshot
+    allocation_id: str = ""
+
+
+@dataclass(frozen=True)
 class ActionCatalog:
     required: Mapping[str, tuple[str, ...]]
 
@@ -235,3 +244,25 @@ class TaskView:
     clarification_id: str = ""
     plan_steps: tuple[dict, ...] = ()
     goal_text: str = ""
+    allocation_robot_binding_id: str | None = None
+    plan_robot_binding_id: str | None = None
+
+
+@dataclass(frozen=True)
+class RobotSummary:
+    binding_id: str
+    wire_robot_id: str
+    enabled: bool
+    connected: bool
+    isolation_reason: str
+    generation: int
+    issues: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class RobotDetail:
+    robot: RobotSummary
+    snapshot: ContextSnapshot | None
+    last_report: Mapping[str, Any]
+    environment: Mapping[str, Any] | None
+    capability: Mapping[str, Any] | None

@@ -1,3 +1,4 @@
+from tests.fixtures.submission import submit_and_plan
 import pytest
 
 from robot_agent.domain.models import RobotEvent, TaskInput, TrustedContext
@@ -10,7 +11,7 @@ CONTEXT = TrustedContext("test-customer", "user", "test-user")
 @pytest.mark.parametrize("terminal_state, outcome", [("succeeded", "SUCCEEDED"), ("failed", "FAILED")])
 async def test_cancel_waits_for_robot_terminal_status(persisted_service, terminal_state, outcome):
     service, robot = persisted_service
-    view = await service.submit(CONTEXT, TaskInput("req", "web", "test", ""), "key")
+    view = await submit_and_plan(service, CONTEXT, TaskInput("req", "web", "test", ""), "key")
     await service.dispatch_next("test-deployment")
     current = await service.get(CONTEXT, view.task_id)
     cancelled = await service.cancel(CONTEXT, view.task_id, current.version, "cancel-key")
@@ -31,7 +32,7 @@ async def test_queue_cancel_sends_no_robot_cancel(persisted_service):
     async def forbidden_cancel(command):
         raise AssertionError("unstarted queue task cannot send cancel")
     robot.cancel = forbidden_cancel
-    view = await service.submit(CONTEXT, TaskInput("req", "web", "test", ""), "key")
+    view = await submit_and_plan(service, CONTEXT, TaskInput("req", "web", "test", ""), "key")
     final = await service.cancel(CONTEXT, view.task_id, view.version, "cancel-key")
     assert final.state == "CANCELLED"
     await service.dispatch_next("test-deployment")
@@ -45,7 +46,7 @@ async def test_dlv_cancel_write_uses_existing_wire_frame(persisted_service):
     robot = Dlv0Robot(service=service, write_gate=TestWriteGate(), max_frame_bytes=8192)
     service.robot = robot
     session, frames = await connect_session(robot)
-    view = await service.submit(CONTEXT, TaskInput("req", "web", "test", ""), "key")
+    view = await submit_and_plan(service, CONTEXT, TaskInput("req", "web", "test", ""), "key")
     await service.dispatch_next("test-deployment")
     current = await service.get(CONTEXT, view.task_id)
     final = await service.cancel(CONTEXT, view.task_id, current.version, "cancel-key")

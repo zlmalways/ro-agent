@@ -22,8 +22,18 @@ class Dlv0Robot:
         self.write_gate = write_gate
         self.max_frame_bytes = max_frame_bytes
         self.sessions = {}
-        self.write_lock = asyncio.Lock()
+        self.write_locks = {}
         self.on_result = None
+
+    def _write_lock(self, customer_id, binding_id):
+        # Registration/replacement, writes and unregister share one lock per robot.
+        # Retain it while the adapter lives so an old waiter cannot use another lock.
+        return self.write_locks.setdefault((customer_id, binding_id), asyncio.Lock())
+
+    def connected_robots(self, customer_id):
+        """Copy public connection coordinates, never credentials or send handles."""
+        return {binding_id: session.generation
+                for (customer, binding_id), session in self.sessions.items() if customer == customer_id}
 
     def _bounded_frame(self, frame):
         if len(json.dumps(frame).encode()) > self.max_frame_bytes:
@@ -34,7 +44,7 @@ class Dlv0Robot:
         frame = self._bounded_frame(frame)
         if frame["type"] != "hello" or frame["robot_id"] != binding["wire_robot_id"]:
             raise PermissionError("robot_id mismatch")
-        async with self.write_lock:
+        async with self._write_lock(binding["customer_id"], binding["binding_id"]):
             generation = await self.service.on_robot_connected(binding, frame)
             session = RobotSession(dict(binding), generation, send)
             self.sessions[binding["customer_id"], binding["binding_id"]] = session
@@ -60,7 +70,9 @@ class Dlv0Robot:
             await self.service.on_robot_observation(session.binding, session.generation, frame)
 
     async def send(self, command):
-        async with self.write_lock:
+        if self.write_gate is None or not await self.write_gate.healthy():
+            return SendObservation(False)
+        async with self._write_lock(command.customer_id, command.robot_binding_id):
             if not await self.write_gate.healthy():
                 return SendObservation(False)
             session = self.sessions.get((command.customer_id, command.robot_binding_id))
@@ -75,14 +87,16 @@ class Dlv0Robot:
             return SendObservation(True)
 
     async def unregister(self, session):
-        async with self.write_lock:
+        async with self._write_lock(session.binding["customer_id"], session.binding["binding_id"]):
             key = (session.binding["customer_id"], session.binding["binding_id"])
             if self.sessions.get(key) is session:
                 del self.sessions[key]
                 await self.service.on_robot_disconnected(session.binding, session.generation)
 
     async def cancel(self, command):
-        async with self.write_lock:
+        if self.write_gate is None or not await self.write_gate.healthy():
+            return SendObservation(False)
+        async with self._write_lock(command.customer_id, command.robot_binding_id):
             if not await self.write_gate.healthy():
                 return SendObservation(False)
             session = self.sessions.get((command.customer_id, command.robot_binding_id))

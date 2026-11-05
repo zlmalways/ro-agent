@@ -24,7 +24,8 @@ class VoiceService:
             error = "VOICE_DUPLICATE_POLICY_UNAVAILABLE"
         else:
             try:
-                view = await self.inputs.audio(context, audio, "audio/wav", request_key or str(uuid4()))
+                view = await self.inputs.audio(context, audio, "audio/wav", request_key or str(uuid4()),
+                                                      wait_for_plan=True)
             except (DependencyUnavailable, PlanError) as exc:
                 error = str(exc)
         frames = await self.output.render(robot_id=robot_id, transcript="", view=view, error=error)

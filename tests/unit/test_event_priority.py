@@ -1,4 +1,5 @@
 """Unknown transport facts never replace physical terminal evidence."""
+from tests.fixtures.submission import submit_and_plan
 
 from dataclasses import replace
 
@@ -14,7 +15,7 @@ CONTEXT = TrustedContext("test-customer", "user", "test-user")
 @pytest.mark.parametrize("state,expected", [("PREPARED", "NONE"), ("DISPATCHING", "RESULT_UNKNOWN"), ("SENT", "RESULT_UNKNOWN")])
 async def test_dispatch_crash_window_unknown(state, expected):
     service, robot, store = build_service()
-    view = await service.submit(CONTEXT, TaskInput("req", "web", "test", ""), "key")
+    view = await submit_and_plan(service, CONTEXT, TaskInput("req", "web", "test", ""), "key")
     await service.dispatch_next("test-deployment")
     task = store.tasks[view.task_id]
     command = replace(task.commands[0], dispatch_state=state)
@@ -22,7 +23,7 @@ async def test_dispatch_crash_window_unknown(state, expected):
     await service.recover("test-deployment")
     recovered = store.tasks[view.task_id]
     assert recovered.commands[0].outcome == expected
-    assert recovered.reason_code == ("RESULT_UNKNOWN" if expected != "NONE" else "REVALIDATION_REQUIRED")
+    assert recovered.state == "CANCELLED" and recovered.reason_code == "RESTART_TASK_LOST"
     if state != "PREPARED":
         await service.dispatch_next("test-deployment")
         assert len(robot.sent) == 1
@@ -30,7 +31,7 @@ async def test_dispatch_crash_window_unknown(state, expected):
 
 async def test_send_error_after_early_success_cannot_overwrite_result():
     service, robot, _ = build_service()
-    view = await service.submit(CONTEXT, TaskInput("req", "web", "test", ""), "key")
+    view = await submit_and_plan(service, CONTEXT, TaskInput("req", "web", "test", ""), "key")
 
     async def failed_send_with_feedback(command):
         robot.sent.append(command)
@@ -45,10 +46,11 @@ async def test_send_error_after_early_success_cannot_overwrite_result():
 
 async def test_running_does_not_resolve_unknown():
     service, robot, store = build_service()
-    view = await service.submit(CONTEXT, TaskInput("req", "web", "test", ""), "key")
+    view = await submit_and_plan(service, CONTEXT, TaskInput("req", "web", "test", ""), "key")
     await service.dispatch_next("test-deployment")
     await service.recover("test-deployment")
     command = robot.sent[0]
     await service.on_robot_event(RobotEvent("running", CONTEXT.customer_id, "test-binding", 1, command.command_id, "running"))
     assert store.tasks[view.task_id].commands[0].outcome == "RESULT_UNKNOWN"
-    assert store.tasks[view.task_id].state == "BLOCKED"
+    assert store.tasks[view.task_id].state == "CANCELLED"
+    assert store.tasks[view.task_id].reason_code == "RESTART_TASK_LOST"

@@ -6,6 +6,7 @@ import pytest
 
 from robot_agent.application.resources import Resources
 from robot_agent.domain.models import TrustedContext
+from robot_agent.domain.robot_report import RobotReportError
 
 
 pytestmark = pytest.mark.integration
@@ -86,8 +87,12 @@ async def test_reported_places_follow_current_map_and_connection(postgres_store,
     second = await report(map="二楼", waypoint_names=["门口"])
     assert set(second.waypoints) == {"门口"}
     assert second.waypoints["门口"] != first.waypoints["门口"]
-    assert not (await report(waypoint_names="门口")).waypoints
-    assert not (await report(waypoint_names=[None, "", "  "])).waypoints
+    # This deliberately bypasses ingress to simulate damaged historical rows.
+    # Segment 3 now diagnoses the damage instead of silently treating it as no places.
+    with pytest.raises(RobotReportError, match="REPORT_INVALID:waypoint_names"):
+        await report(waypoint_names="门口")
+    with pytest.raises(RobotReportError, match="REPORT_INVALID:waypoint_names"):
+        await report(waypoint_names=[None, "", "  "])
     assert not (await report(connected=False, waypoint_names=["门口"])).waypoints
 
     stale = (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat()

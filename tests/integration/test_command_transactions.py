@@ -1,4 +1,5 @@
 """Real commits/rollbacks; the simulated robot stays under tests/fixtures."""
+from tests.fixtures.submission import submit_and_plan
 
 import asyncio
 
@@ -32,7 +33,7 @@ async def install_deferred_failure(store, condition):
 @pytest.mark.parametrize("dispatch_state", ["PREPARED", "DISPATCHING"])
 async def test_failed_commit_never_sends(persisted_service, postgres_store, dispatch_state):
     service, robot = persisted_service
-    await service.submit(CONTEXT, INPUT, "key")
+    view = await submit_and_plan(service, CONTEXT, INPUT, "key")
     await install_deferred_failure(postgres_store, f"NEW.dispatch_state = '{dispatch_state}'")
     with pytest.raises(asyncpg.CheckViolationError, match="test commit rejected"):
         await service.dispatch_next("test-deployment")
@@ -41,12 +42,12 @@ async def test_failed_commit_never_sends(persisted_service, postgres_store, disp
     assert count == 0
     if dispatch_state == "PREPARED":
         assert await postgres_store.pool.fetchval("SELECT count(*) FROM ra_commands") == 0
-        assert await postgres_store.pool.fetchval("SELECT task_id FROM ra_execution_guard") is None
+        assert await postgres_store.pool.fetchval("SELECT task_id FROM ra_execution_guard") == view.task_id
 
 
 async def test_terminal_updates_atomically(persisted_service, postgres_store):
     service, robot = persisted_service
-    view = await service.submit(CONTEXT, INPUT, "key")
+    view = await submit_and_plan(service, CONTEXT, INPUT, "key")
     await service.dispatch_next("test-deployment")
     command = robot.sent[0]
     event = RobotEvent("result-1", CONTEXT.customer_id, "test-binding", 1, command.command_id, "succeeded")
@@ -67,7 +68,7 @@ async def test_terminal_updates_atomically(persisted_service, postgres_store):
 
 async def test_failed_terminal_commit_leaves_no_partial_result(persisted_service, postgres_store):
     service, robot = persisted_service
-    view = await service.submit(CONTEXT, INPUT, "key")
+    view = await submit_and_plan(service, CONTEXT, INPUT, "key")
     await service.dispatch_next("test-deployment")
     before = await service.get(CONTEXT, view.task_id)
     await install_deferred_failure(postgres_store, "NEW.outcome = 'SUCCEEDED'")
@@ -81,17 +82,17 @@ async def test_failed_terminal_commit_leaves_no_partial_result(persisted_service
 
 async def test_concurrent_dispatch_creates_one_command(persisted_service, postgres_store):
     service, robot = persisted_service
-    await service.submit(CONTEXT, INPUT, "key")
+    await submit_and_plan(service, CONTEXT, INPUT, "key")
     await asyncio.gather(service.dispatch_next("test-deployment"), service.dispatch_next("test-deployment"))
     assert len(robot.sent) == 1
     assert await postgres_store.pool.fetchval("SELECT count(*) FROM ra_commands") == 1
     assert await postgres_store.pool.fetchval("SELECT count(*) FROM ra_execution_guard WHERE task_id IS NOT NULL") == 1
 
 
-async def test_one_deployment_has_one_active_task(persisted_service, postgres_store):
+async def test_one_robot_has_one_active_task(persisted_service, postgres_store):
     service, robot = persisted_service
-    first = await service.submit(CONTEXT, INPUT, "first-key")
-    second = await service.submit(CONTEXT, INPUT, "second-key")
+    first = await submit_and_plan(service, CONTEXT, INPUT, "first-key")
+    second = await submit_and_plan(service, CONTEXT, INPUT, "second-key")
     await service.dispatch_next("test-deployment")
     await service.dispatch_next("test-deployment")
     assert len(robot.sent) == 1
@@ -101,7 +102,7 @@ async def test_one_deployment_has_one_active_task(persisted_service, postgres_st
 
 async def test_feedback_before_send_return_preserves_success(persisted_service):
     service, robot = persisted_service
-    view = await service.submit(CONTEXT, INPUT, "key")
+    view = await submit_and_plan(service, CONTEXT, INPUT, "key")
     original_send = robot.send
 
     async def send_then_receive(command):
@@ -119,7 +120,7 @@ async def test_feedback_before_send_return_preserves_success(persisted_service):
 
 async def test_event_id_cannot_be_reused_for_different_result(persisted_service, postgres_store):
     service, robot = persisted_service
-    view = await service.submit(CONTEXT, INPUT, "key")
+    view = await submit_and_plan(service, CONTEXT, INPUT, "key")
     await service.dispatch_next("test-deployment")
     command = robot.sent[0]
     await service.on_robot_event(RobotEvent("same-id", CONTEXT.customer_id, "test-binding", 1,
@@ -134,7 +135,7 @@ async def test_event_id_cannot_be_reused_for_different_result(persisted_service,
 
 async def test_command_wire_is_immutable_in_database(persisted_service, postgres_store):
     service, robot = persisted_service
-    await service.submit(CONTEXT, INPUT, "key")
+    await submit_and_plan(service, CONTEXT, INPUT, "key")
     await service.dispatch_next("test-deployment")
     with pytest.raises(asyncpg.CheckViolationError):
         await postgres_store.pool.execute("UPDATE ra_commands SET wire_args='{}'::jsonb")
@@ -153,7 +154,7 @@ async def test_validation_record_failure_never_creates_executable_plan(persisted
         DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION test_fail_validation();
     """)
     with pytest.raises(asyncpg.CheckViolationError):
-        await service.submit(CONTEXT, INPUT, "key")
+        await submit_and_plan(service, CONTEXT, INPUT, "key")
     await service.dispatch_next("test-deployment")
     assert robot.sent == []
     assert await postgres_store.pool.fetchval("SELECT count(*) FROM ra_plans") == 0

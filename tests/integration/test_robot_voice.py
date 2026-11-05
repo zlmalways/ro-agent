@@ -89,6 +89,7 @@ async def test_voice_segment_and_final_result_use_separate_command_connection(pe
                 first = [json.loads(await asyncio.wait_for(voice_ws.recv(), 3)) for _ in range(5)]
                 assert first[-1]["state"] == "idle"
                 assert first[2]["type"] == "audio"
+                await service.schedule_pending("test-deployment")
                 for _ in range(2):
                     await service.dispatch_next("test-deployment")
                     command = json.loads(await asyncio.wait_for(command_ws.recv(), 3))
@@ -100,3 +101,20 @@ async def test_voice_segment_and_final_result_use_separate_command_connection(pe
                 final = [json.loads(await asyncio.wait_for(voice_ws.recv(), 3)) for _ in range(5)]
                 assert final[3]["text"].startswith("机器人报告任务已完成")
                 assert final[-1]["state"] == "idle"
+
+
+async def test_robot_voice_keeps_its_planning_question_reply(persisted_service):
+    service, _ = persisted_service
+    service.planner.value = {"outcome": "clarify", "question": "去哪个前台？", "required_slots": ["location"]}
+    app = voice_app(service)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app), base_url="http://test") as client:
+        result = await client.post("/api/voice/robot/chat/stream",
+            files={"audio": ("test.wav", audio_fixture(), "audio/wav")},
+            data={"robot_id": "test-voice", "woke": "true"},
+            headers={"x-robot-token": "test-robot-token", "Idempotency-Key": "clarify-voice"})
+        assert result.status_code == 200
+        frames = [json.loads(line) for line in result.text.splitlines()]
+        reply = next(frame for frame in frames if frame['type'] == 'done')
+        assert reply['is_question'] and '去哪个前台？' in reply['text']
+        assert '请在网页回答' in reply['text']
+        assert await service.store.pool.fetchval('SELECT state FROM ra_tasks') == 'NEEDS_CLARIFICATION'

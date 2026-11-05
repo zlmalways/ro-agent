@@ -143,39 +143,64 @@ class Runtime:
         self.error = ""
 
     async def start(self):
-        if not await self.owner.acquire():
-            raise RuntimeError("deployment execution ownership unavailable")
+        if self.owner is not None:
+            if not await self.owner.acquire():
+                raise RuntimeError("deployment execution ownership unavailable")
         await self.service.recover(self.deployment_id)
+        if self.owner is not None and not await self.owner.healthy():
+            raise RuntimeError("deployment ownership lost during startup")
         self.loop_task = asyncio.create_task(self._run())
 
     async def _run(self):
-        while not self.stopping.is_set() and await self.owner.healthy():
-            try:
-                await self.service.expire_commands(self.deployment_id)
-                await self.service.dispatch_next(self.deployment_id)
-                self.error = ""
-            except (DependencyUnavailable, PreflightBlocked) as exc:
-                self.error = type(exc).__name__
-                logging.getLogger(__name__).warning("runtime dependency unavailable: %s", self.error)
-            except (OSError, asyncpg.PostgresError, asyncpg.InterfaceError):
-                self.error = "STORAGE_UNAVAILABLE"
-                self.owner._disable()
-                return
-            try:
-                await asyncio.wait_for(self.stopping.wait(), self.scan_interval)
-            except asyncio.TimeoutError:
-                pass
+        try:
+            while not self.stopping.is_set() and (self.owner is None or await self.owner.healthy()):
+                try:
+                    await self.service.expire_commands(self.deployment_id)
+                    self.service.raise_background_error()
+                    await self.service.schedule_pending(self.deployment_id, wait_for_plan=False)
+                    self.service.raise_background_error()
+                    await self.service.dispatch_next(self.deployment_id, wait_for_send=False)
+                except (DependencyUnavailable, PreflightBlocked) as exc:
+                    self.error = type(exc).__name__
+                    logging.getLogger(__name__).warning("runtime dependency unavailable: %s", self.error)
+                except (OSError, asyncpg.PostgresError, asyncpg.InterfaceError):
+                    self.error = "STORAGE_UNAVAILABLE"
+                    if self.owner is not None:
+                        self.owner._disable()
+                    return
+                except Exception:
+                    self.error = "BACKGROUND_WORK_FAILED"
+                    logging.getLogger(__name__).exception("runtime work failed")
+                    if self.owner is not None:
+                        self.owner._disable()
+                    return
+                try:
+                    await asyncio.wait_for(self.stopping.wait(), self.scan_interval)
+                except asyncio.TimeoutError:
+                    pass
+
+        finally:
+            await self.service.close_work()
 
     async def close(self):
-        self.owner._disable()
+        if self.owner is not None:
+            self.owner._disable()
         self.stopping.set()
-        if self.loop_task is not None:
+        try:
+            if self.loop_task is not None:
+                if not self.loop_task.done():
+                    self.loop_task.cancel()
+                try:
+                    await self.loop_task
+                except asyncio.CancelledError:
+                    pass
+        finally:
             try:
-                await self.loop_task
+                if self.service is not None:
+                    await self.service.close_work()
             finally:
-                await self.owner.close()
-        else:
-            await self.owner.close()
+                if self.owner is not None:
+                    await self.owner.close()
 
 
 class SubmissionOrderQueue:

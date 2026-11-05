@@ -7,9 +7,10 @@ import json
 from pathlib import Path
 from datetime import datetime, timezone
 import sys
+from uuid import uuid4
 
 from robot_agent.domain.models import (
-    Command, ConflictError, ContextSnapshot, NotFoundError, Plan, PlanStep, Task,
+    Command, ConflictError, ContextSnapshot, NotFoundError, Plan, PlanStep, RobotAllocation, Task,
 )
 
 
@@ -54,10 +55,10 @@ class PostgresStore:
 
     @asynccontextmanager
     async def system_unit_of_work(self):
-        # Execution writers use one order: slot, sorted tasks, units/commands/bindings.
+        # Serialize only short allocation/state transactions, never model or socket IO.
+        # There need not be an allocation row yet; locking a missing row is not a lock.
         async with self.pool.acquire() as connection, connection.transaction():
-            await connection.fetchrow("SELECT * FROM ra_execution_guard WHERE deployment_id=$1 FOR UPDATE",
-                                      self.deployment_id)
+            await connection.execute("SELECT pg_advisory_xact_lock(hashtextextended(current_schema() || ':ra-allocation', 0))")
             yield SystemTaskTransaction(connection, None, self.deployment_id)
 
     async def migrate(self):
@@ -80,8 +81,6 @@ class PostgresStore:
                 if not installed:
                     await connection.execute(sql)
                     await connection.execute("INSERT INTO ra_schema_migrations VALUES ($1, $2)", version, checksum)
-            await connection.execute("INSERT INTO ra_execution_guard (deployment_id) VALUES ($1) ON CONFLICT DO NOTHING",
-                                     self.deployment_id)
 
 
 class TaskTransaction:
@@ -91,12 +90,23 @@ class TaskTransaction:
         self.deployment_id = deployment_id
         self.loaded_versions = {}
 
+    async def task_allocation_binding(self, task):
+        self._check_customer(task.customer_id)
+        return await self.connection.fetchval("""SELECT binding_id FROM ra_execution_guard
+            WHERE deployment_id=$1 AND customer_id=$2 AND task_id=$3""",
+            self.deployment_id, task.customer_id, task.task_id)
+
     async def owner_history(self, limit, before):
         # Count and page the same owner's rows at one PostgreSQL read snapshot.
         result = await self.connection.fetchrow("""
             WITH owned AS NOT MATERIALIZED (
-                SELECT task_id, goal_text, state, reason_code, version, created_at, updated_at, queue_seq
-                FROM ra_tasks WHERE customer_id=$1 AND actor_kind=$2 AND actor_id=$3
+                SELECT t.task_id, t.goal_text, t.state, t.reason_code, t.version, t.created_at, t.updated_at, t.queue_seq,
+                       p.snapshot->>'robot_binding_id' AS plan_robot_binding_id,
+                       g.binding_id AS allocation_robot_binding_id
+                FROM ra_tasks t LEFT JOIN ra_plans p ON p.customer_id=t.customer_id
+                    AND p.task_id=t.task_id AND p.plan_id=t.active_plan_id
+                LEFT JOIN ra_execution_guard g ON g.customer_id=t.customer_id AND g.task_id=t.task_id AND g.deployment_id=$6
+                WHERE t.customer_id=$1 AND t.actor_kind=$2 AND t.actor_id=$3
             ), page AS (
                 SELECT * FROM owned WHERE $4::bigint IS NULL OR queue_seq < $4
                 ORDER BY queue_seq DESC LIMIT $5
@@ -105,7 +115,7 @@ class TaskTransaction:
             )
             SELECT (SELECT COALESCE(json_agg(page ORDER BY queue_seq DESC), '[]') FROM page) AS tasks,
                    (SELECT COALESCE(json_object_agg(state, n), '{}') FROM counts) AS state_counts""",
-            self.context.customer_id, self.context.actor_kind, self.context.actor_id, before, limit)
+            self.context.customer_id, self.context.actor_kind, self.context.actor_id, before, limit, self.deployment_id)
         return json.loads(result["tasks"]), json.loads(result["state_counts"])
 
     async def home_task_rows(self):
@@ -356,16 +366,40 @@ class SystemTaskTransaction(TaskTransaction):
                                                   event.customer_id, event.cmd_id)
         return await self.load_task(task_id, for_update=True) if task_id else None
 
-    async def claim_slot(self, deployment_id, task):
-        if deployment_id != self.deployment_id:
-            raise ConflictError("deployment differs from configured store")
-        guard = await self.connection.fetchrow("SELECT * FROM ra_execution_guard WHERE deployment_id=$1", deployment_id)
-        if guard["task_id"] not in (None, task.task_id):
-            return False
-        await self.connection.execute("""UPDATE ra_execution_guard SET customer_id=$1,task_id=$2,unit_id=$3,binding_id=$4,
-            state='ACTIVE' WHERE deployment_id=$5""", task.customer_id, task.task_id, task.unit_id,
-            task.snapshot.robot_binding_id, deployment_id)
-        return True
+    @staticmethod
+    def _allocation(row):
+        return RobotAllocation(row["customer_id"], row["task_id"], row["binding_id"],
+                               _snapshot(json.loads(row["allocation_snapshot"])), row["allocation_id"]) if row else None
+
+    async def allocations(self, customer_id):
+        rows = await self.connection.fetch("SELECT * FROM ra_execution_guard WHERE customer_id=$1", customer_id)
+        return {row["binding_id"]: self._allocation(row) for row in rows}
+
+    async def task_allocation(self, task):
+        row = await self.connection.fetchrow("""SELECT * FROM ra_execution_guard
+            WHERE deployment_id=$1 AND customer_id=$2 AND task_id=$3""",
+            self.deployment_id, task.customer_id, task.task_id)
+        return self._allocation(row)
+
+    async def prior_waiters(self, task):
+        rows = await self.connection.fetch("""SELECT task_id FROM ra_tasks WHERE customer_id=$1
+            AND state IN ('RECEIVED','QUEUED','READY') AND queue_seq <
+            (SELECT queue_seq FROM ra_tasks WHERE customer_id=$1 AND task_id=$2) ORDER BY queue_seq""",
+            task.customer_id, task.task_id)
+        return [await self.load_task(row["task_id"]) for row in rows]
+
+    async def claim_slot(self, deployment_id, task, snapshot):
+        if deployment_id != self.deployment_id or snapshot.customer_id != task.customer_id:
+            raise ConflictError("allocation scope differs from task/store")
+        allocation_id = str(uuid4())
+        status = await self.connection.execute("""INSERT INTO ra_execution_guard
+            (customer_id,task_id,unit_id,binding_id,state,allocation_snapshot,deployment_id,allocation_id)
+            VALUES ($1,$2,$3,$4,'ACTIVE',$5::jsonb,$6,$7) ON CONFLICT DO NOTHING""",
+            task.customer_id, task.task_id, task.unit_id, snapshot.robot_binding_id,
+            _json(asdict(snapshot)), deployment_id, allocation_id)
+        if status != "INSERT 0 1":
+            raise ConflictError("task or robot is already allocated")
+        return RobotAllocation(task.customer_id, task.task_id, snapshot.robot_binding_id, snapshot, allocation_id)
 
     async def get_binding(self, customer_id, binding_id):
         row = await self.connection.fetchrow("SELECT * FROM ra_robot_bindings WHERE customer_id=$1 AND binding_id=$2",
@@ -383,9 +417,9 @@ class SystemTaskTransaction(TaskTransaction):
             VALUES ($1,$2,$3,$4,$5,true)""", value["customer_id"], value["binding_id"], value["wire_robot_id"],
             value["token_env"], list(value["allowed_actions"]))
 
-    async def customer_bindings(self, customer_id):
-        rows = await self.connection.fetch("SELECT * FROM ra_robot_bindings WHERE customer_id=$1 AND enabled=true ORDER BY binding_id",
-                                           customer_id)
+    async def customer_bindings(self, customer_id, *, include_disabled=False):
+        rows = await self.connection.fetch("SELECT * FROM ra_robot_bindings WHERE customer_id=$1 AND ($2 OR enabled=true) ORDER BY binding_id",
+                                           customer_id, include_disabled)
         return [dict(row) for row in rows]
 
     async def put_resource(self, context, binding_id, kind, entries, source_refs):
@@ -433,9 +467,10 @@ class SystemTaskTransaction(TaskTransaction):
             WHERE customer_id=$3 AND binding_id=$4""", reason, evidence_id, binding["customer_id"], binding["binding_id"])
 
     async def tasks_for_binding(self, binding):
-        rows = await self.connection.fetch("""SELECT t.task_id FROM ra_tasks t JOIN ra_units u
-            ON t.customer_id=u.customer_id AND t.task_id=u.task_id
-            WHERE u.customer_id=$1 AND u.binding_id=$2 ORDER BY t.task_id FOR UPDATE OF t""",
+        rows = await self.connection.fetch("""SELECT t.task_id FROM ra_tasks t WHERE t.customer_id=$1 AND (
+            EXISTS (SELECT 1 FROM ra_units u WHERE u.customer_id=t.customer_id AND u.task_id=t.task_id AND u.binding_id=$2)
+            OR EXISTS (SELECT 1 FROM ra_execution_guard g WHERE g.customer_id=t.customer_id AND g.task_id=t.task_id AND g.binding_id=$2))
+            ORDER BY t.task_id FOR UPDATE OF t""",
             binding["customer_id"], binding["binding_id"])
         return [await self.load_task(row["task_id"]) for row in rows]
 
@@ -451,7 +486,10 @@ class SystemTaskTransaction(TaskTransaction):
             ORDER BY task_id""", timeout_seconds)
         return [row["task_id"] for row in rows]
 
-    async def release_slot(self, task_id):
-        await self.connection.execute("""UPDATE ra_execution_guard SET customer_id=NULL,task_id=NULL,unit_id=NULL,
-            binding_id=NULL,owner_run_id=NULL,state='IDLE' WHERE deployment_id=$1 AND task_id=$2""",
-                                      self.deployment_id, task_id)
+    async def release_allocation(self, allocation):
+        if not allocation.allocation_id:
+            raise ValueError("release requires the exact allocation identity")
+        await self.connection.execute("""DELETE FROM ra_execution_guard WHERE deployment_id=$1
+            AND customer_id=$2 AND task_id=$3 AND binding_id=$4 AND allocation_id=$5""",
+            self.deployment_id, allocation.customer_id, allocation.task_id,
+            allocation.robot_binding_id, allocation.allocation_id)

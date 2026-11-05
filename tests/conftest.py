@@ -42,4 +42,5 @@ async def postgres_store():
 def persisted_service(postgres_store):
     service, robot, _ = build_service()
     service.store = postgres_store
+    service.resources.store = postgres_store
     return service, robot
