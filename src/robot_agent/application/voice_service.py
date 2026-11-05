@@ -7,12 +7,15 @@ from robot_agent.domain.models import DependencyUnavailable, NotFoundError, Plan
 
 
 class VoiceService:
-    def __init__(self, *, inputs, output, allow_woken_audio, max_audio_bytes, duplicate_policy=None):
+    def __init__(self, *, inputs, output, allow_woken_audio, max_audio_bytes, duplicate_policy=None,
+                 allow_unwoken_pcm=False):
         self.inputs = inputs
         self.output = output
         self.allow_woken_audio = allow_woken_audio
         self.max_audio_bytes = max_audio_bytes
         self.duplicate_policy = duplicate_policy
+        # Explicit deployment opt-in for the authorised PCM test; never inferred from client hints.
+        self.allow_unwoken_pcm = allow_unwoken_pcm
         self.sessions = {}
         self.notifications = set()
 
@@ -53,6 +56,22 @@ class VoiceService:
             await session["send"]({"type": "state", "state": "thinking"})
             frames = await self.submit(context, binding["wire_robot_id"], audio, "", woke=woke)
             await self._send_tail(session, frames)
+
+    async def deliver_pcm(self, session, segment):
+        """Submit one complete PCM-derived WAV through the existing recorded input workflow."""
+        if not self.allow_unwoken_pcm:
+            raise PlanError("PCM_TASK_SUBMISSION_DISABLED")
+        if segment.end_reason != "silence":
+            raise PlanError("PCM_TOO_LONG")
+        binding = session["binding"]
+        key = (binding["customer_id"], binding["binding_id"])
+        context = TrustedContext(binding["customer_id"], "robot", binding["binding_id"])
+        async with session["lock"]:
+            if self.sessions.get(key) is not session:
+                raise PlanError("VOICE_SESSION_REPLACED")
+            view = await self.inputs.audio(context, segment.wav_bytes, "audio/wav", segment.segment_id)
+        return {"type": "pcm_task", "segment_id": segment.segment_id, "request_key": segment.segment_id,
+                "task_id": view.task_id, "state": view.state}
 
     async def _send_tail(self, session, frames):
         play_secs = 0

@@ -23,6 +23,37 @@ from robot_agent.domain.models import ActionCatalog
 from robot_agent.runtime import Runtime, RuntimeOwnership, SubmissionOrderQueue
 
 
+def _pcm_settings(configuration):
+    settings = configuration.get("voice_pcm", {})
+    if not isinstance(settings, dict) or any(
+        not isinstance(settings.get(key, False), bool) for key in ("enabled", "submit_tasks")
+    ):
+        raise ValueError("voice_pcm.enabled and submit_tasks must be booleans")
+    if settings.get("submit_tasks") and not settings.get("enabled"):
+        raise ValueError("PCM task submission requires PCM capture to be enabled")
+    return settings
+
+
+def build_pcm_segments(configuration, environment):
+    """Capture remains opt-in; task submission has a separate explicit switch."""
+    settings = _pcm_settings(configuration)
+    if not settings.get("enabled", False):
+        return None
+    from robot_agent.application.pcm_segment_service import PcmSegmentService
+    from robot_agent.config import load_pcm_segment_config
+    return PcmSegmentService(load_pcm_segment_config(environment))
+
+
+def build_pcm_voice(configuration, inputs):
+    """Explicit test listening mode, reusing the existing audio/task input service."""
+    if not _pcm_settings(configuration).get("submit_tasks", False):
+        return None
+    from robot_agent.adapters.voice_output import VoiceOutput
+    from robot_agent.application.voice_service import VoiceService
+    return VoiceService(inputs=inputs, output=VoiceOutput(None), allow_woken_audio=False,
+                        allow_unwoken_pcm=True, max_audio_bytes=configuration["limits"]["max_audio_bytes"])
+
+
 def build_asr(configuration, environment):
     provider = environment.get("VOICE_ASR_PROVIDER")
     if configuration.get("allow_external_calls") is not True or provider not in {"doubao", "openai"}:
@@ -83,11 +114,13 @@ def build_app(configuration, *, environment=None):
     app = create_app(identity=identity)
     app.state.execution_enabled = enabled
     app.state.limits = limits
+    app.state.pcm_segments = build_pcm_segments(configuration, environment)
 
     @asynccontextmanager
     async def lifespan(app):
         pool = await asyncpg.create_pool(dsn, server_settings={"search_path": database.get("schema", "public")})
         runtime = None
+        voice = None
         try:
             store = PostgresStore(pool, deployment_id=deployment["id"])
             await store.migrate()
@@ -110,6 +143,9 @@ def build_app(configuration, *, environment=None):
             service.robot = robot
             app.state.service, app.state.resources, app.state.robot = service, resources, robot
             app.state.inputs = InputService(service, asr, max_audio_bytes=limits["max_audio_bytes"])
+            voice = build_pcm_voice(configuration, app.state.inputs)
+            if voice is not None:
+                app.state.voice = voice
             if owner:
                 runtime = Runtime(owner=owner, service=service, deployment_id=deployment["id"], scan_interval=limits["scan_interval"])
                 await runtime.start()
@@ -120,6 +156,10 @@ def build_app(configuration, *, environment=None):
                 if runtime:
                     await runtime.close()
             finally:
-                await pool.close()
+                try:
+                    if voice is not None:
+                        await voice.close()
+                finally:
+                    await pool.close()
     app.router.lifespan_context = lifespan
     return app

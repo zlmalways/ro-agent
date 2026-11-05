@@ -17,6 +17,7 @@ dependencies = [
 [project.optional-dependencies]
 dev = ["pytest==9.1.1", "pytest-asyncio==1.4.0", "ruff==0.17.0"]
 browser = ["playwright==1.63.0"]
+voice-pcm = ["silero-vad==6.2.3", "torch==2.10.0"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
@@ -29,7 +30,11 @@ where = ["src"]
 pythonpath = ["src", "."]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
-markers = ["integration: requires isolated PostgreSQL", "acceptance: requires explicit live authorization"]
+markers = [
+    "integration: requires isolated PostgreSQL",
+    "acceptance: requires explicit live authorization",
+    "voice_pcm: real optional Silero CPU inference without external services",
+]
 
 [tool.ruff]
 line-length = 110
