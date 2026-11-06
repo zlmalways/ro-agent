@@ -7,6 +7,7 @@ import struct
 from uuid import uuid4
 import wave
 
+import httpx
 from websockets.asyncio.client import connect
 from websockets.exceptions import WebSocketException
 
@@ -17,6 +18,61 @@ from robot_agent.domain.models import DependencyUnavailable, PlanError
 class Transcript:
     text: str
     provider_ref: str
+
+
+class OpenAIASR:
+    """Whole-file transcription through the official OpenAI Audio API."""
+
+    def __init__(self, *, api_key, model, timeout_seconds, max_response_bytes, transport=None):
+        self.api_key = api_key
+        self.model = model
+        self.timeout_seconds = timeout_seconds
+        self.max_response_bytes = max_response_bytes
+        self.transport = transport
+
+    async def transcribe(self, audio):
+        if not self.model:
+            raise DependencyUnavailable("ASR_MODEL_UNCONFIGURED")
+        if not self.api_key:
+            raise DependencyUnavailable("ASR_UNAVAILABLE")
+        if not audio:
+            raise PlanError("AUDIO_INVALID")
+
+        client_id = str(uuid4())
+        headers = {"Authorization": "Bearer " + self.api_key, "X-Client-Request-Id": client_id}
+        try:
+            async with asyncio.timeout(self.timeout_seconds), httpx.AsyncClient(
+                transport=self.transport, timeout=self.timeout_seconds, trust_env=False, follow_redirects=False,
+            ) as client:
+                async with client.stream(
+                    "POST", "https://api.openai.com/v1/audio/transcriptions", headers=headers,
+                    data={"model": self.model}, files={"file": ("audio.wav", audio, "audio/wav")},
+                ) as response:
+                    if response.status_code in (401, 403):
+                        raise DependencyUnavailable("ASR_AUTH_FAILED")
+                    if response.status_code != 200:
+                        raise DependencyUnavailable("ASR_PROVIDER_ERROR")
+                    body = bytearray()
+                    async for chunk in response.aiter_bytes():
+                        if len(body) + len(chunk) > self.max_response_bytes:
+                            raise DependencyUnavailable("ASR_RESPONSE_TOO_LARGE")
+                        body.extend(chunk)
+                    reference = response.headers.get("x-request-id") or f"client-{client_id}"
+        except (TimeoutError, httpx.TimeoutException) as exc:
+            raise DependencyUnavailable("ASR_TIMEOUT") from exc
+        except httpx.RequestError as exc:
+            raise DependencyUnavailable("ASR_UNAVAILABLE") from exc
+
+        try:
+            result = json.loads(body)
+        except (ValueError, UnicodeError) as exc:
+            raise DependencyUnavailable("ASR_INVALID_RESPONSE") from exc
+        if not isinstance(result, dict) or not isinstance(result.get("text"), str):
+            raise DependencyUnavailable("ASR_INVALID_RESPONSE")
+        text = result["text"].strip()
+        if not text:
+            raise PlanError("ASR_EMPTY")
+        return Transcript(text, f"openai:{self.model}:{reference}")
 
 
 class DoubaoASR:

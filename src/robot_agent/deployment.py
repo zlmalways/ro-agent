@@ -7,7 +7,7 @@ import socket
 
 import asyncpg
 
-from robot_agent.adapters.asr import DoubaoASR, DoubaoStream
+from robot_agent.adapters.asr import DoubaoASR, DoubaoStream, OpenAIASR
 from robot_agent.adapters.dlv0 import Dlv0Robot
 from robot_agent.adapters.identity import ConfiguredIdentity
 from robot_agent.adapters.llm import OpenAICompatiblePlanner
@@ -20,6 +20,71 @@ from robot_agent.application.task_service import TaskService
 from robot_agent.config import load_provider_config
 from robot_agent.domain.models import ActionCatalog
 from robot_agent.runtime import Runtime, RuntimeOwnership, SubmissionOrderQueue
+
+
+def _pcm_settings(configuration):
+    settings = configuration.get("voice_pcm", {})
+    if not isinstance(settings, dict) or any(
+        not isinstance(settings.get(key, False), bool) for key in ("enabled", "submit_tasks", "evaluate_wake")
+    ):
+        raise ValueError("voice_pcm.enabled, submit_tasks and evaluate_wake must be booleans")
+    if (settings.get("submit_tasks") or settings.get("evaluate_wake")) and not settings.get("enabled"):
+        raise ValueError("PCM processing requires PCM capture to be enabled")
+    return settings
+
+
+def build_pcm_segments(configuration, environment):
+    """Capture remains opt-in; task submission has a separate explicit switch."""
+    settings = _pcm_settings(configuration)
+    if not settings.get("enabled", False):
+        return None
+    from robot_agent.application.pcm_segment_service import PcmSegmentService
+    from robot_agent.config import load_pcm_segment_config
+    return PcmSegmentService(load_pcm_segment_config(environment))
+
+
+def build_pcm_voice(configuration, inputs):
+    """With both switches enabled, only wake-approved PCM creates tasks."""
+    settings = _pcm_settings(configuration)
+    if not settings.get("submit_tasks") and not settings.get("evaluate_wake"):
+        return None
+    from robot_agent.adapters.voice_output import VoiceOutput
+    from robot_agent.application.voice_service import VoiceService
+    evaluation = None
+    if settings.get("evaluate_wake"):
+        from robot_agent.application.voice_wake_evaluation import VoiceWakeEvaluation
+        from robot_agent.application.voice_wake_service import VoiceWakeConfig, VoiceWakeService
+        wake_settings = configuration.get("voice_wake", {})
+        if not isinstance(wake_settings, dict):
+            raise ValueError("voice_wake must be an object")
+        evaluation = VoiceWakeEvaluation(inputs, VoiceWakeService(VoiceWakeConfig(**wake_settings)))
+    submit_tasks = settings.get("submit_tasks", False)
+    return VoiceService(inputs=inputs, output=None if evaluation else VoiceOutput(None),
+                        allow_woken_audio=False, allow_unwoken_pcm=submit_tasks and evaluation is None,
+                        wake_evaluation=evaluation, submit_woken_pcm=submit_tasks and evaluation is not None,
+                        max_audio_bytes=configuration["limits"]["max_audio_bytes"])
+
+
+def build_asr(configuration, environment):
+    provider = environment.get("VOICE_ASR_PROVIDER")
+    if configuration.get("allow_external_calls") is not True or provider not in {"doubao", "openai"}:
+        return DoubaoASR()  # Unconfigured ASR fails on use; text tasks can still run.
+    limits = configuration["limits"]
+    timeout = limits.get("asr_timeout")
+    if not isinstance(timeout, (int, float)) or timeout <= 0:
+        raise ValueError("explicit ASR timeout is required")
+    if provider == "openai":
+        return OpenAIASR(
+            api_key=environment.get("VOICE_ASR_OPENAI_API_KEY", "").strip(),
+            model=environment.get("VOICE_ASR_OPENAI_MODEL", "").strip(),
+            timeout_seconds=timeout, max_response_bytes=limits["provider_response_bytes"],
+        )
+    return DoubaoASR(DoubaoStream(
+        api_key=environment.get("VOICE_ASR_DOUBAO_API_KEY", ""),
+        resource_id=environment.get("VOICE_ASR_DOUBAO_RESOURCE_ID", ""),
+        stream_url=environment.get("VOICE_ASR_DOUBAO_STREAM_URL", ""),
+        timeout_seconds=timeout, max_response_bytes=limits["provider_response_bytes"],
+    ))
 
 
 def build_app(configuration, *, environment=None):
@@ -45,7 +110,11 @@ def build_app(configuration, *, environment=None):
     if not isinstance(use_reported_waypoints, bool):
         raise ValueError("resources.use_reported_waypoints must be a boolean")
     users, robots = {}, {}
+    customer_owners = {}
     for row in configuration.get("users", []):
+        owner = customer_owners.setdefault(row["customer_id"], row["actor_id"])
+        if owner != row["actor_id"]:
+            raise ValueError("each customer space must belong to one user account")
         secret = environment.get(row["token_env"], "")
         if secret:
             users[secret] = {key: value for key, value in row.items() if key != "token_env"}
@@ -70,11 +139,13 @@ def build_app(configuration, *, environment=None):
     app = create_app(identity=identity)
     app.state.execution_enabled = enabled
     app.state.limits = limits
+    app.state.pcm_segments = build_pcm_segments(configuration, environment)
 
     @asynccontextmanager
     async def lifespan(app):
         pool = await asyncpg.create_pool(dsn, server_settings={"search_path": database.get("schema", "public")})
         runtime = None
+        voice = None
         try:
             store = PostgresStore(pool, deployment_id=deployment["id"])
             await store.migrate()
@@ -86,15 +157,7 @@ def build_app(configuration, *, environment=None):
                                   missing_credentials=missing_credentials)
             planner = OpenAICompatiblePlanner(load_provider_config(environment) if configuration.get("allow_external_calls") is True else None,
                                               max_response_bytes=limits["provider_response_bytes"])
-            asr = DoubaoASR()
-            if configuration.get("allow_external_calls") is True and environment.get("VOICE_ASR_PROVIDER") == "doubao":
-                if not limits.get("asr_timeout") or limits["asr_timeout"] <= 0:
-                    raise ValueError("explicit ASR timeout is required")
-                provider = DoubaoStream(api_key=environment.get("VOICE_ASR_DOUBAO_API_KEY", ""),
-                                        resource_id=environment.get("VOICE_ASR_DOUBAO_RESOURCE_ID", ""),
-                                        stream_url=environment.get("VOICE_ASR_DOUBAO_STREAM_URL", ""),
-                                        timeout_seconds=limits["asr_timeout"], max_response_bytes=limits["provider_response_bytes"])
-                asr = DoubaoASR(provider)
+            asr = build_asr(configuration, environment)
             owner = RuntimeOwnership(dsn=dsn, deployment_id=deployment["id"], host_id=deployment["host_id"],
                                      lock_path=deployment["lock_path"], advisory_key=deployment["advisory_key"],
                                      schema=database.get("schema", "public")) if enabled else None
@@ -108,6 +171,9 @@ def build_app(configuration, *, environment=None):
             resources.connected_robots = robot.connected_robots
             app.state.service, app.state.resources, app.state.robot = service, resources, robot
             app.state.inputs = InputService(service, asr, max_audio_bytes=limits["max_audio_bytes"])
+            voice = build_pcm_voice(configuration, app.state.inputs)
+            if voice is not None:
+                app.state.voice = voice
             runtime = Runtime(owner=owner, service=service, deployment_id=deployment["id"], scan_interval=limits["scan_interval"])
             await runtime.start()
             app.state.runtime = runtime
@@ -117,6 +183,10 @@ def build_app(configuration, *, environment=None):
                 if runtime:
                     await runtime.close()
             finally:
-                await pool.close()
+                try:
+                    if voice is not None:
+                        await voice.close()
+                finally:
+                    await pool.close()
     app.router.lifespan_context = lifespan
     return app

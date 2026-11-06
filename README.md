@@ -58,6 +58,8 @@
 
 实现基线：Python/FastAPI、PostgreSQL、单实例、兼容现有 dlv/0；模型与 ASR 是外部适配依赖。开发采用获准的 Superpowers 流程和 TDD，生产执行不降级到内存或假模型。
 
+官方整段 WAV 转写可在提供方配置中选择 `VOICE_ASR_PROVIDER=openai`，并通过 `VOICE_ASR_OPENAI_MODEL` 指定模型名（例如 `gpt-transcribe`）。启动平台时单独注入 `VOICE_ASR_OPENAI_API_KEY`；只有显式启用 `allow_external_calls` 才会请求官方转写接口。任务规划使用独立的 LLM 配置。
+
 ## 本地验证
 
 Python 3.11+，在项目虚拟环境安装 `pip install -e ".[dev]"` 后运行 `python -m pytest -q` 和 `python -m ruff check src tests`。协议模拟和内存存储只在 tests/fixtures 中，不能配置为生产后备。

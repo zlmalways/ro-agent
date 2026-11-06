@@ -83,6 +83,17 @@ class PostgresStore:
                     await connection.execute("INSERT INTO ra_schema_migrations VALUES ($1, $2)", version, checksum)
 
 
+# Read scope shared by history, home and individual task visibility. Robot
+# ownership is the private customer space, independent of its live allocation.
+_TASK_READ_SCOPE = """t.customer_id=$1 AND (
+    (t.actor_kind=$2 AND t.actor_id=$3)
+    OR ($2='user' AND t.actor_kind='robot' AND EXISTS (
+        SELECT 1 FROM ra_robot_bindings b
+        WHERE b.customer_id=t.customer_id AND b.binding_id=t.actor_id
+    ))
+)"""
+
+
 class TaskTransaction:
     def __init__(self, connection, context, deployment_id):
         self.connection = connection
@@ -96,8 +107,13 @@ class TaskTransaction:
             WHERE deployment_id=$1 AND customer_id=$2 AND task_id=$3""",
             self.deployment_id, task.customer_id, task.task_id)
 
+    async def task_visible(self, task_id):
+        return await self.connection.fetchval(
+            "SELECT EXISTS(SELECT 1 FROM ra_tasks t WHERE " + _TASK_READ_SCOPE + " AND t.task_id=$4)",
+            self.context.customer_id, self.context.actor_kind, self.context.actor_id, task_id)
+
     async def owner_history(self, limit, before):
-        # Count and page the same owner's rows at one PostgreSQL read snapshot.
+        # Count and page the same visible rows at one PostgreSQL read snapshot.
         result = await self.connection.fetchrow("""
             WITH owned AS NOT MATERIALIZED (
                 SELECT t.task_id, t.goal_text, t.state, t.reason_code, t.version, t.created_at, t.updated_at, t.queue_seq,
@@ -106,7 +122,7 @@ class TaskTransaction:
                 FROM ra_tasks t LEFT JOIN ra_plans p ON p.customer_id=t.customer_id
                     AND p.task_id=t.task_id AND p.plan_id=t.active_plan_id
                 LEFT JOIN ra_execution_guard g ON g.customer_id=t.customer_id AND g.task_id=t.task_id AND g.deployment_id=$6
-                WHERE t.customer_id=$1 AND t.actor_kind=$2 AND t.actor_id=$3
+                WHERE """ + _TASK_READ_SCOPE + """
             ), page AS (
                 SELECT * FROM owned WHERE $4::bigint IS NULL OR queue_seq < $4
                 ORDER BY queue_seq DESC LIMIT $5
@@ -119,7 +135,7 @@ class TaskTransaction:
         return json.loads(result["tasks"]), json.loads(result["state_counts"])
 
     async def home_task_rows(self):
-        # Active rows come from the entire owner's queue, independently of the history cursor.
+        # Active visible rows are independent of the history cursor.
         return await self.connection.fetch("""
             SELECT t.task_id, t.goal_text, t.state, t.reason_code, t.version, t.queue_seq, t.created_at,
                    t.clarification, t.active_plan_id AS plan_id, t.completed,
@@ -132,7 +148,7 @@ class TaskTransaction:
                     AND c.plan_id=t.active_plan_id) AS commands
             FROM ra_tasks t LEFT JOIN ra_plans p ON p.customer_id=t.customer_id
                 AND p.task_id=t.task_id AND p.plan_id=t.active_plan_id
-            WHERE t.customer_id=$1 AND t.actor_kind=$2 AND t.actor_id=$3
+            WHERE """ + _TASK_READ_SCOPE + """
               AND (t.state IN ('NEEDS_CLARIFICATION','WAITING_APPROVAL','RUNNING',
                                'CANCEL_REQUESTED','READY','QUEUED')
                    OR (t.state='BLOCKED' AND t.reason_code='AUTHORIZATION_REQUIRED'))

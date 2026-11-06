@@ -860,11 +860,17 @@ class TaskService:
         return {"tasks": page, "next_before": page[-1]["queue_seq"] if len(rows) > limit else None,
                 "state_counts": state_counts}
 
+    async def _can_view_task(self, context, tx, task):
+        if task.customer_id != context.customer_id:
+            return False
+        if await tx.task_visible(task.task_id):
+            return True
+        return "approver" in context.roles and await self.policy.can_approve(context, task)
+
     async def get(self, context, task_id):
         async with self.store.unit_of_work(context) as tx:
             task = await tx.load_task(task_id, actor_scope=False)
-            if task.customer_id != context.customer_id or (task.actor_id != context.actor_id and
-                    ("approver" not in context.roles or not await self.policy.can_approve(context, task))):
+            if not await self._can_view_task(context, tx, task):
                 raise NotFoundError(task_id)
             return await self.view_in_transaction(tx, task)
 
@@ -873,7 +879,7 @@ class TaskService:
             raise PlanError("invalid event cursor")
         async with self.store.unit_of_work(context) as tx:
             task = await tx.load_task(task_id, actor_scope=False)
-            if task.actor_id != context.actor_id and ("approver" not in context.roles or not await self.policy.can_approve(context, task)):
+            if not await self._can_view_task(context, tx, task):
                 raise NotFoundError(task_id)
             events = await tx.task_events(task_id, after, 100)
         return {"events": events, "next_seq": events[-1]["seq"] if events else after}
