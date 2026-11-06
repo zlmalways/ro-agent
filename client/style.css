@@ -501,6 +501,11 @@ body.chat-open main > header, body.chat-open main > section:not(#conversation) {
 #chat-empty h2 { font-size: 27px; }
 #chat-empty p { color: var(--muted); }
 #task-detail { max-width: 830px; width: 100%; margin: 30px auto; }
+#conversation-history { max-width: 830px; width: 100%; margin: 0 auto; }
+#conversation-history:empty { display: none; }
+.conversation-turn { margin: 30px 0; padding-bottom: 24px; border-bottom: 1px solid var(--line); }
+.previous-task-note { color: var(--muted); font-size: 12px; margin-bottom: 18px; }
+#continuation-note { margin: 0 0 12px; font-size: 13px; }
 .user-message { width: fit-content; max-width: 85%; margin-left: auto; padding: 13px 19px; background: var(--tint); border-radius: 17px 17px 4px 17px; white-space: pre-wrap; overflow-wrap: anywhere; }
 .user-message small { display: block; text-align: right; font-size: 12px; margin-top: 6px; }
 .assistant-message { display: grid; grid-template-columns: 30px minmax(0,1fr); gap: 14px; margin-top: 32px; }

@@ -54,14 +54,28 @@ async def test_connect_chat_and_explicit_list_navigation(dashboard):
     assert urlsplit(page.url).fragment == 'chat'
 
 
-async def test_finished_conversation_has_bottom_new_task_action(dashboard):
-    page, _, _ = dashboard
+async def test_finished_conversation_accepts_next_task_without_new_task_click(dashboard):
+    page, service, _ = dashboard
     await submit(page, '结束后再安排任务')
+    first_id = await page.locator('#task-id').text_content()
     await page.locator('#cancel').click()
     await expect(page.locator('#status')).to_have_text('已停止')
-    await expect(page.locator('#followup-new')).to_be_visible()
-    await page.locator('#followup-new').click()
+    await expect(page.locator('#goal')).to_be_visible()
     await expect(page.locator('#goal')).to_have_value('')
+    await expect(page.locator('#followup-new')).to_be_hidden()
+    await page.locator('#goal').fill('接下来去另一个地方')
+    async with page.expect_response(lambda response: response.url.endswith('/tasks/' + first_id)
+                                    and response.request.method == 'GET'):
+        pass
+    await expect(page.locator('#goal')).to_have_value('接下来去另一个地方')
+    await page.locator('#send').click()
+    await expect(page.locator('#task-id')).not_to_have_text(first_id)
+    await expect(page.locator('#conversation-history')).to_contain_text('结束后再安排任务')
+    await expect(page.locator('#conversation-history')).to_contain_text('已停止')
+    await expect(page.locator('#task-goal')).to_have_text('接下来去另一个地方')
+    assert await service.store.pool.fetchval('SELECT count(*) FROM ra_tasks') == 2
+    await page.locator('#sidebar-new').click()
+    await expect(page.locator('#conversation-history')).to_be_empty()
     await expect(page.locator('#chat-empty')).to_be_visible()
     await expect(page.locator('#task-detail')).to_be_hidden()
 

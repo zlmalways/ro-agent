@@ -203,7 +203,8 @@ function conversation(open, updateRoute = true) {
   $('conversation').hidden = !open;
   $('dock').hidden = open;
   $('dock').setAttribute('aria-expanded', String(open));
-  if (open)(currentTask ? $('new-task') : submission ? $('cancel') : $('goal')).focus();
+  if (open)(canContinueTask(currentTask) ? $('goal') : currentTask ? $('new-task') :
+    submission?.ticket === selection ? $('cancel') : $('goal')).focus();
 }
 
 function stopRecording() {
@@ -219,6 +220,7 @@ function blankTask() {
   selection++;
   stopRecording();
   currentTask = null;
+  $('conversation-history').replaceChildren();
   $('task-detail').hidden = true;
   $('chat-empty').hidden = false;
   $('active-composer').hidden = true;
@@ -265,8 +267,20 @@ function taskRow(row) {
   return el;
 }
 
+function canContinueTask(task) {
+  if (!task || task.state === 'CANCEL_REQUESTED') return false;
+  return endedStates.has(task.state) || task.advancement_stopped === true;
+}
+
 function updateControls() {
-  $('send').disabled = !credential || writing || !$('goal').value.trim();
+  const visibleSubmission = submission?.ticket === selection;
+  const mayCompose = currentTask ? canContinueTask(currentTask) : !visibleSubmission;
+  $('submit-form').hidden = !mayCompose;
+  // Keep follow-up changes limited to text; existing audio entry remains for a blank chat.
+  $('voice-input').hidden = Boolean(currentTask || visibleSubmission);
+  $('send').disabled = !credential || writing || !mayCompose || !$('goal').value.trim();
+  $('goal').placeholder = currentTask ? '继续输入下一条任务…' : '描述你想让机器人做的事…';
+  $('continuation-note').hidden = !currentTask || !mayCompose;
   $('audio-submit').disabled = !credential || writing;
   if (!recording) $('record').disabled = !credential || writing;
   $('chat-access-note').hidden = Boolean(credential);
@@ -298,7 +312,8 @@ function updateControls() {
   $('refresh-task').hidden = !task && !unconfirmed;
   $('refresh-task').disabled = Boolean(submission?.checking);
   $('refresh-task').textContent = unconfirmed ? '查询提交结果' : '刷新任务状态';
-  $('followup-new').hidden = !ending && !failed && !unconfirmed;
+  $('followup-new').hidden = !unconfirmed;
+  $('active-composer').hidden = !pending && (!task || (mayCompose && !failed && !canStop(task)));
   $('cancel').disabled = Boolean(waiting || busy);
   $('cancel').textContent = failed ? '请求停止机器人' : busy ? '正在停止…' : '■ 停止';
   $('composer-message').textContent = unconfirmed ? '提交结果未确认' : failed ? '后续执行已结束，此任务不会继续' : ending ? '这个任务已结束' : waiting ? cancellationMessage(task) : stopError ? (stopRejected ? '停止请求未受理' : '停止请求结果未确认') : stopAttempted ? '停止请求已尝试，结果以任务记录为准' : pending ? '正在提交任务' : normalComposerMessage(task);
@@ -858,6 +873,14 @@ async function write(path, payload, audioFile, fromBoard = false) {
     $('error').textContent = '请先在设置中应用访问凭据。';
     return;
   }
+  const isSubmission = path === '/tasks' || path === '/tasks/audio';
+  // A follow-up is a new task, never a retry or amendment of the ended task.
+  if (isSubmission && currentTask && !canContinueTask(currentTask)) return;
+  if (isSubmission && !currentTask && submission?.ticket === selection) return;
+  if (isSubmission && currentTask) {
+    archiveCurrentTask();
+    pendingWrite = null;
+  }
   const operation = requestAction(path, payload);
   if (operation && (!operation.key || actionAttempts.has(operation.key))) {
     updateControls();
@@ -880,12 +903,15 @@ async function write(path, payload, audioFile, fromBoard = false) {
     board.refreshControls();
   }
   writing = true;
-  const isSubmission = path === '/tasks' || path === '/tasks/audio';
   const attempt = isSubmission ? {
     goal: audioFile ? '语音任务：' + audioFile.name : payload.text,
     request, ticket, stopRequested: false
   } : null;
-  if (attempt) { submission = attempt; renderPending(); renderHistory(); }
+  if (attempt) {
+    $('goal').value = '';
+    $('answer').value = '';
+    submission = attempt; renderPending(); renderHistory();
+  }
   updateControls();
   $('error').textContent = '';
   try {
@@ -1003,6 +1029,20 @@ async function stopTask(task) {
   } finally {
     if (epoch === identityEpoch) { request.busy = false; updateControls(); renderHistory(); }
   }
+}
+
+function archiveCurrentTask() {
+  if (!canContinueTask(currentTask)) return;
+  const previous = $('task-detail').cloneNode(true);
+  previous.removeAttribute('id');
+  previous.classList.add('conversation-turn');
+  previous.dataset.taskId = currentTask.task_id;
+  previous.hidden = false;
+  // Old turns are readable snapshots, not a second set of working controls.
+  previous.querySelectorAll('form, #decisions, #action-result').forEach(element => element.remove());
+  previous.querySelectorAll('[id]').forEach(element => element.removeAttribute('id'));
+  previous.prepend(node('p', '此前任务 · 以下保留提交下一条时的记录', 'previous-task-note'));
+  $('conversation-history').append(previous);
 }
 
 function newTask() {
