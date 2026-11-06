@@ -1,25 +1,26 @@
 'use strict';
 
 // Render only this user's persisted work. The existing task dialog owns answers and decisions.
-function createHomeBoard({request, openTask, approve, node}) {
+function createHomeBoard({request, openTask, approve, node, taskError, errorCard, taskState, actionStatus, cancellationMessage}) {
   const boxes = {
     questions: document.getElementById('home-questions'),
     approvals: document.getElementById('home-approvals'),
     running: document.getElementById('home-running'),
-    queue: document.getElementById('home-queue')
+    queue: document.getElementById('home-queue'),
+    errors: document.getElementById('home-errors')
   };
   const sync = document.getElementById('home-sync');
   const feedback = document.getElementById('home-feedback');
   const limits = {};
   let items = [], connected = false, loaded = false, pending = false, requestId = 0;
   const empties = {questions:'没有待回答的问题。', approvals:'没有待批准的计划。',
-    running:'当前没有执行中的任务。', queue:'当前没有排队任务。'};
+    running:'当前没有执行中的任务。', queue:'当前没有排队任务。', errors:'暂无发生错误的任务。'};
 
   function category(task) {
+    if (taskError(task)) return 'errors';
     switch (task.state) {
       case 'NEEDS_CLARIFICATION': return 'questions';
       case 'WAITING_APPROVAL': return 'approvals';
-      case 'BLOCKED': return task.reason_code === 'AUTHORIZATION_REQUIRED' ? 'approvals' : null;
       case 'RUNNING':
       case 'CANCEL_REQUESTED': return 'running';
       case 'READY':
@@ -37,6 +38,7 @@ function createHomeBoard({request, openTask, approve, node}) {
 
   function stepStatus(task, step) {
     const command = (task.result_summary || []).findLast(c => c.step_id === step.step_id);
+    if (command?.evidence_conflict) return '执行回执冲突';
     if (command?.outcome === 'SUCCEEDED' || task.completed?.includes(step.step_id)) return '已完成';
     if (command?.outcome === 'RUNNING') return '机器人执行中';
     if (command?.outcome === 'RESULT_UNKNOWN') return '结果未知';
@@ -57,9 +59,15 @@ function createHomeBoard({request, openTask, approve, node}) {
     article.append(title);
     const actions = node('div', '', 'board-actions');
     const details = () => openTask(task.task_id);
-    if (group === 'questions') {
+    if (group === 'errors') {
+      article.append(node('p', taskState(task), 'board-meta'), errorCard(task));
+      if (task.cancel_result) article.append(node('p', '停止请求：' + cancellationMessage(task), 'board-meta'));
+      actions.append(button('查看任务', details));
+    } else if (group === 'questions') {
       article.append(node('p', task.clarification || '等待补充任务信息。', 'board-question'));
-      actions.append(button('回答问题', () => openTask(task.task_id, true), true));
+      const status = actionStatus(task, 'answer');
+      if (status) article.append(node('p', status, 'board-meta'));
+      actions.append(button(status ? '查看任务' : '回答问题', () => openTask(task.task_id, !status), !status));
     } else if (group === 'queue') {
       const state = task.state === 'QUEUED' ? '已排队，等待执行机会' : '计划已就绪，等待调度';
       const position = task.queue_seq == null ? '顺序待同步' : '我的队列 · 第 ' + (index + 1) + ' 项';
@@ -75,7 +83,7 @@ function createHomeBoard({request, openTask, approve, node}) {
       const running = group === 'running';
       if (running) {
         const robot = task.result_summary?.at(-1)?.robot_binding_id || task.binding_id;
-        const state = task.state === 'CANCEL_REQUESTED' ? '已请求取消，等待反馈' : '执行进度';
+        const state = task.state === 'CANCEL_REQUESTED' ? cancellationMessage(task) : '执行进度';
         article.append(node('p', robot ? robot + ' · ' + state : state, 'board-meta'));
       }
       const steps = task.plan_steps || [];
@@ -86,6 +94,7 @@ function createHomeBoard({request, openTask, approve, node}) {
           if (running) {
             const status = stepStatus(task, step);
             li.append(node('span', status, status === '机器人执行中' ? 'board-state current' : 'board-state'));
+            if (status === '执行回执冲突') li.append(node('small', '收到相互矛盾的回执，无法确认执行结果', 'board-meta'));
           }
           list.append(li);
         }
@@ -94,7 +103,11 @@ function createHomeBoard({request, openTask, approve, node}) {
         article.append(node('p', '暂无已保存的计划步骤。', 'board-meta'));
       }
       if (!running && task.plan_id && steps.length) {
-        actions.append(button('批准计划', () => approve(task), true));
+        const status = actionStatus(task, 'approve');
+        const approval = button('批准计划', () => approve(task), true);
+        approval.disabled = Boolean(status);
+        if (status) article.append(node('p', status, 'board-meta'));
+        actions.append(approval);
       }
       actions.append(button(running ? '查看执行进度' : '查看详情', details));
     }
@@ -157,5 +170,5 @@ function createHomeBoard({request, openTask, approve, node}) {
     render();
   }
 
-  return {load, observe, reset, announce: message => { feedback.textContent = message; }};
+  return {load, observe, reset, refreshControls: render, announce: message => { feedback.textContent = message; }};
 }

@@ -72,8 +72,9 @@ async def test_rejected_input_is_not_shown_as_an_active_task(dashboard):
     await page.locator('#sidebar-new').click()
     await page.get_by_label('任务指令').fill('这个请求超过长度限制')
     await page.locator('#send').click()
-    await expect(page.locator('#status')).to_have_text('提交失败')
-    await expect(page.locator('#composer-message')).to_contain_text('未受理')
+    await expect(page.locator('#status')).to_have_text('提交结果未确认')
+    await expect(page.locator('#composer-message')).to_contain_text('提交结果未确认')
+    await expect(page.locator('#refresh-task')).to_have_text('查询提交结果')
     await expect(page.locator('#cancel')).to_be_hidden()
     await expect(page.locator('#followup-new')).to_be_visible()
     assert await service.store.pool.fetchval('SELECT count(*) FROM ra_tasks') == 0
@@ -98,22 +99,30 @@ async def test_failed_stop_stays_visible_in_chat_and_list(dashboard):
     await submit(page, '停止失败后需要明确提示')
     identifier = await page.locator('#task-id').text_content()
     cancel_url = '**/api/robot-agent/tasks/' + identifier + '/cancel'
-    await page.route(cancel_url, lambda route: route.abort())
+    cancellations = []
+
+    async def fail_cancel(route):
+        cancellations.append(route.request.url)
+        await route.abort()
+
+    await page.route(cancel_url, fail_cancel)
     await page.locator('#cancel').click()
-    await expect(page.locator('#error')).to_contain_text('停止尚未确认')
+    await expect(page.locator('#error')).to_contain_text('停止请求结果未确认')
     async with page.expect_response(lambda response: response.url.endswith('/tasks/' + identifier)
                                     and response.request.method == 'GET'):
         pass
-    await expect(page.locator('#stop-hint')).to_contain_text('停止尚未确认')
-    await expect(page.locator('#cancel')).to_have_text('重试停止')
+    await expect(page.locator('#stop-hint')).to_contain_text('停止请求结果未确认')
+    await expect(page.locator('#cancel')).to_be_hidden()
     await page.get_by_role('link', name='任务', exact=True).click()
     row = page.locator('#history [data-task-id="' + identifier + '"]')
-    await expect(row).to_contain_text('停止尚未确认')
-    await expect(row.locator('.task-stop')).to_have_text('重试停止')
+    await expect(row).to_contain_text('停止请求结果未确认')
+    await expect(row.locator('.task-stop')).to_have_count(0)
     await page.unroute(cancel_url)
-    await row.locator('.task-stop').click()
-    await expect(row).to_contain_text('已停止')
-    await expect(row).not_to_contain_text('停止尚未确认')
+    await row.locator('.task-open').click()
+    await page.locator('#refresh-task').click()
+    await expect(page.locator('#status')).not_to_have_text('已停止')
+    await expect(page.locator('#cancel')).to_be_hidden()
+    assert len(cancellations) == 1
 
 
 @pytest.mark.parametrize("feedback_first", [False, True])
@@ -146,7 +155,7 @@ async def test_recovered_poll_clears_obsolete_stop_error(dashboard, feedback_fir
                                             and response.request.method == 'GET'):
                 pass
         else:
-            await expect(page.locator('#error')).to_contain_text('停止尚未确认')
+            await expect(page.locator('#error')).to_contain_text('停止请求结果未确认')
             release.set()
         await expect(page.locator('#status')).to_have_text('已停止')
         await expect(page.locator('#error')).to_be_empty()

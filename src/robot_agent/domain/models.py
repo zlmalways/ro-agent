@@ -5,7 +5,17 @@ from datetime import datetime, timezone
 from typing import Any, Mapping
 
 
-class PlanError(ValueError):
+class ModuleFailure:
+    """Carry a module's reason without exposing arbitrary exception text to users."""
+
+    def __init__(self, reason, *, source="", phase=""):
+        super().__init__(reason)
+        self.reason = reason
+        self.source = source
+        self.phase = phase
+
+
+class PlanError(ModuleFailure, ValueError):
     pass
 
 
@@ -17,11 +27,11 @@ class NotFoundError(LookupError):
     pass
 
 
-class DependencyUnavailable(RuntimeError):
+class DependencyUnavailable(ModuleFailure, RuntimeError):
     pass
 
 
-class PreflightBlocked(ValueError):
+class PreflightBlocked(ModuleFailure, ValueError):
     pass
 
 
@@ -198,6 +208,14 @@ class TaskEvent:
 @dataclass(frozen=True)
 class SendObservation:
     sent: bool
+    # False by itself is not evidence of non-delivery. Adapters must explicitly
+    # state that the socket write was never attempted.
+    may_have_sent: bool = True
+    reason_code: str = ""
+    source: str = "transport"
+
+    def __bool__(self):
+        return self.sent
 
 
 @dataclass(frozen=True)
@@ -221,6 +239,9 @@ class Task:
     answers: tuple[str, ...] = ()
     cancel_requested: bool = False
     resume_phase: str = ""
+    error: Mapping[str, Any] | None = None
+    advancement_stopped: bool = False
+    cancel_result: Mapping[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -246,6 +267,9 @@ class TaskView:
     goal_text: str = ""
     allocation_robot_binding_id: str | None = None
     plan_robot_binding_id: str | None = None
+    error: Mapping[str, Any] | None = None
+    advancement_stopped: bool = False
+    cancel_result: Mapping[str, Any] | None = None
 
 
 @dataclass(frozen=True)

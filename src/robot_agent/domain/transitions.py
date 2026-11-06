@@ -3,11 +3,12 @@
 from dataclasses import replace
 
 from .models import ChangeSet, Command, RobotEvent, Task
+from .errors import stop_task
 
 
 def inflight_commands(task: Task) -> tuple[Command, ...]:
     """Already started commands without a definitive result; PREPARED is unsent."""
-    return tuple(command for command in task.commands if command.dispatch_state != "PREPARED"
+    return tuple(command for command in task.commands if command.dispatch_state not in {"PREPARED", "NOT_SENT"}
                  and command.outcome not in {"SUCCEEDED", "FAILED"})
 
 
@@ -17,7 +18,7 @@ def is_abandoned(task: Task) -> bool:
 
 
 def check_transition(task: Task, command: Command | None, event: RobotEvent, *, current_generation=None) -> ChangeSet:
-    if command is None or command.dispatch_state == "PREPARED":
+    if command is None or command.dispatch_state in {"PREPARED", "NOT_SENT"}:
         return ChangeSet(task)
     if event.customer_id != command.customer_id or event.robot_binding_id != command.robot_binding_id:
         return ChangeSet(task)
@@ -27,7 +28,7 @@ def check_transition(task: Task, command: Command | None, event: RobotEvent, *, 
     if event.state not in {"pending", "running", "succeeded", "failed"}:
         return ChangeSet(task)
     original = task
-    abandoned = is_abandoned(task)
+    stopped = task.advancement_stopped or is_abandoned(task)
     outcome = {"pending": "NONE", "running": "RUNNING", "succeeded": "SUCCEEDED", "failed": "FAILED"}[event.state]
     if command.outcome in {"SUCCEEDED", "FAILED"}:
         if outcome in {"SUCCEEDED", "FAILED"} and outcome != command.outcome:
@@ -35,6 +36,7 @@ def check_transition(task: Task, command: Command | None, event: RobotEvent, *, 
             task = replace(task, result_disputed=True,
                            state=task.state if task.state in {"SUCCEEDED", "FAILED", "CANCELLED"} else "BLOCKED",
                            reason_code="EVIDENCE_CONFLICT")
+            task = stop_task(task, "EVIDENCE_CONFLICT", source="execution", phase="feedback", command=command)
         else:
             return ChangeSet(task)
     else:
@@ -43,23 +45,22 @@ def check_transition(task: Task, command: Command | None, event: RobotEvent, *, 
         if command.outcome == "RUNNING" and outcome == "NONE":
             return ChangeSet(task)
         changed = replace(command, outcome=outcome, evidence_ids=command.evidence_ids + (event.event_id,))
-        if outcome == "SUCCEEDED":
+        if outcome == "SUCCEEDED" and not stopped:
             completed = task.completed + (command.step_id,)
             state = "SUCCEEDED" if len(completed) == len(task.plan.steps) else task.state
             reason = task.reason_code
-            if reason == "RESULT_UNKNOWN":
-                state, reason = ("SUCCEEDED" if len(completed) == len(task.plan.steps) else "RUNNING"), ""
             if task.cancel_requested or task.state == "CANCEL_REQUESTED":
                 state = "CANCELLED"
             elif task.state == "BLOCKED" and reason and reason != "RESULT_UNKNOWN":
                 state = "BLOCKED"
             task = replace(task, completed=completed, state=state, reason_code=reason)
-        elif outcome == "FAILED":
+        elif outcome == "FAILED" and not stopped:
             if task.cancel_requested or task.state == "CANCEL_REQUESTED":
                 task = replace(task, state="CANCELLED", reason_code="")
             else:
                 task = replace(task, state="BLOCKED", reason_code="ACTION_FAILED")
-    if abandoned:
+                task = stop_task(task, "ACTION_FAILED", source="execution", phase="feedback", command=command)
+    if stopped:
         # Late evidence belongs to the old command, never to a new execution.
         task = replace(task, state=original.state, reason_code=original.reason_code,
                        completed=original.completed, resume_phase=original.resume_phase)
@@ -67,7 +68,7 @@ def check_transition(task: Task, command: Command | None, event: RobotEvent, *, 
     return ChangeSet(replace(task, commands=commands, version=task.version + 1), changed, event)
 
 
-def uncertain_execution(task: Task) -> ChangeSet:
+def uncertain_execution(task: Task, *, reason="RESULT_UNKNOWN", phase="feedback") -> ChangeSet:
     if task.state in {"SUCCEEDED", "FAILED", "CANCELLED"}:
         return ChangeSet(task)
     changed = tuple(replace(command, outcome="RESULT_UNKNOWN")
@@ -76,6 +77,9 @@ def uncertain_execution(task: Task) -> ChangeSet:
     if changed == task.commands:
         return ChangeSet(task)
     # Preserve independent isolation/authorization reasons; uncertainty still stays on the command.
-    reason = task.reason_code if task.reason_code and task.reason_code != "RESULT_UNKNOWN" else "RESULT_UNKNOWN"
+    task_reason = task.reason_code if task.reason_code and task.reason_code != "RESULT_UNKNOWN" else reason
     state = "CANCEL_REQUESTED" if task.cancel_requested else "BLOCKED"
-    return ChangeSet(replace(task, commands=changed, state=state, reason_code=reason, version=task.version + 1))
+    updated = replace(task, commands=changed, state=state, reason_code=task_reason, version=task.version + 1)
+    command = next((item for item in changed if item.outcome == "RESULT_UNKNOWN"), None)
+    return ChangeSet(stop_task(updated, reason, source="transport" if phase == "write" else "execution",
+                               phase=phase, command=command))

@@ -71,19 +71,21 @@ class Dlv0Robot:
 
     async def send(self, command):
         if self.write_gate is None or not await self.write_gate.healthy():
-            return SendObservation(False)
+            return SendObservation(False, False, "OWNERSHIP_UNAVAILABLE", "runtime")
         async with self._write_lock(command.customer_id, command.robot_binding_id):
             if not await self.write_gate.healthy():
-                return SendObservation(False)
+                return SendObservation(False, False, "OWNERSHIP_UNAVAILABLE", "runtime")
             session = self.sessions.get((command.customer_id, command.robot_binding_id))
             if session is None or session.generation != command.dispatch_generation:
-                return SendObservation(False)
-            if not await self.service.may_write(command):
-                return SendObservation(False)
+                return SendObservation(False, False, "ROBOT_DISCONNECTED")
+            permission = await self.service.may_write(command)
+            if not permission:
+                return permission if isinstance(permission, SendObservation) else SendObservation(False, False, "SEND_NOT_ATTEMPTED")
+            frame = command_frame(command)
             try:
-                await session.send(command_frame(command))
+                await session.send(frame)
             except (OSError, RuntimeError):
-                return SendObservation(False)
+                return SendObservation(False, True, "SEND_FAILED")
             return SendObservation(True)
 
     async def unregister(self, session):
@@ -95,15 +97,15 @@ class Dlv0Robot:
 
     async def cancel(self, command):
         if self.write_gate is None or not await self.write_gate.healthy():
-            return SendObservation(False)
+            return SendObservation(False, False, "OWNERSHIP_UNAVAILABLE", "runtime")
         async with self._write_lock(command.customer_id, command.robot_binding_id):
             if not await self.write_gate.healthy():
-                return SendObservation(False)
+                return SendObservation(False, False, "OWNERSHIP_UNAVAILABLE", "runtime")
             session = self.sessions.get((command.customer_id, command.robot_binding_id))
             if session is None:
-                return SendObservation(False)
+                return SendObservation(False, False, "ROBOT_DISCONNECTED")
             try:
                 await session.send(cancel_frame(command.command_id))
             except (OSError, RuntimeError):
-                return SendObservation(False)
+                return SendObservation(False, True, "SEND_FAILED")
             return SendObservation(True)

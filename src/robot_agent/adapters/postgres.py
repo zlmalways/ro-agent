@@ -4,14 +4,17 @@ from contextlib import asynccontextmanager
 from dataclasses import asdict
 from hashlib import sha256
 import json
+import logging
 from pathlib import Path
 from datetime import datetime, timezone
 import sys
 from uuid import uuid4
+import asyncpg
 
 from robot_agent.domain.models import (
     Command, ConflictError, ContextSnapshot, NotFoundError, Plan, PlanStep, RobotAllocation, Task,
 )
+from robot_agent.domain.errors import make_error
 
 
 def _json(value):
@@ -45,21 +48,51 @@ class PostgresStore:
     def __init__(self, pool, *, deployment_id):
         self.pool = pool
         self.deployment_id = deployment_id
+        self.write_available = True
 
     @asynccontextmanager
     async def unit_of_work(self, context):
         if context is None:
             raise ValueError("customer transactions require TrustedContext")
-        async with self.pool.acquire() as connection, connection.transaction():
-            yield TaskTransaction(connection, context, self.deployment_id)
+        try:
+            async with self.pool.acquire() as connection, connection.transaction():
+                yield TaskTransaction(connection, context, self.deployment_id)
+        except (OSError, asyncpg.PostgresError, asyncpg.InterfaceError, asyncpg.InternalClientError) as exc:
+            self._storage_failed(exc)
+            raise
+
+    @asynccontextmanager
+    async def read_snapshot(self, context):
+        """A coherent UI projection without holding locks across multiple tasks."""
+        if context is None:
+            raise ValueError("customer read snapshots require TrustedContext")
+        try:
+            async with self.pool.acquire() as connection, connection.transaction(isolation="repeatable_read", readonly=True):
+                yield TaskTransaction(connection, context, self.deployment_id, read_only=True)
+        except (OSError, asyncpg.PostgresError, asyncpg.InterfaceError, asyncpg.InternalClientError) as exc:
+            self._storage_failed(exc)
+            raise
 
     @asynccontextmanager
     async def system_unit_of_work(self):
         # Serialize only short allocation/state transactions, never model or socket IO.
         # There need not be an allocation row yet; locking a missing row is not a lock.
-        async with self.pool.acquire() as connection, connection.transaction():
-            await connection.execute("SELECT pg_advisory_xact_lock(hashtextextended(current_schema() || ':ra-allocation', 0))")
-            yield SystemTaskTransaction(connection, None, self.deployment_id)
+        try:
+            async with self.pool.acquire() as connection, connection.transaction():
+                await connection.execute("SELECT pg_advisory_xact_lock(hashtextextended(current_schema() || ':ra-allocation', 0))")
+                yield SystemTaskTransaction(connection, None, self.deployment_id)
+        except (OSError, asyncpg.PostgresError, asyncpg.InterfaceError, asyncpg.InternalClientError) as exc:
+            self._storage_failed(exc)
+            raise
+
+    def _storage_failed(self, exc):
+        # Authorization errors raised by a business operation inside the context
+        # also inherit OSError; they are not evidence of a broken database.
+        if isinstance(exc, PermissionError):
+            return
+        self.write_available = False
+        logging.getLogger(__name__).error("storage access failed: type=%s sqlstate=%s",
+                                         type(exc).__name__, getattr(exc, "sqlstate", ""))
 
     async def migrate(self):
         migrations = Path(__file__).resolve().parents[3] / "db/migrations"
@@ -84,11 +117,12 @@ class PostgresStore:
 
 
 class TaskTransaction:
-    def __init__(self, connection, context, deployment_id):
+    def __init__(self, connection, context, deployment_id, *, read_only=False):
         self.connection = connection
         self.context = context
         self.deployment_id = deployment_id
         self.loaded_versions = {}
+        self.read_only = read_only
 
     async def task_allocation_binding(self, task):
         self._check_customer(task.customer_id)
@@ -134,8 +168,8 @@ class TaskTransaction:
                 AND p.task_id=t.task_id AND p.plan_id=t.active_plan_id
             WHERE t.customer_id=$1 AND t.actor_kind=$2 AND t.actor_id=$3
               AND (t.state IN ('NEEDS_CLARIFICATION','WAITING_APPROVAL','RUNNING',
-                               'CANCEL_REQUESTED','READY','QUEUED')
-                   OR (t.state='BLOCKED' AND t.reason_code='AUTHORIZATION_REQUIRED'))
+                               'CANCEL_REQUESTED','READY','QUEUED','BLOCKED','FAILED')
+                   OR t.error IS NOT NULL)
             ORDER BY t.queue_seq""", self.context.customer_id, self.context.actor_kind, self.context.actor_id)
 
     def _check_customer(self, customer_id, actor_id=None, actor_kind=None):
@@ -157,6 +191,23 @@ class TaskTransaction:
                                              customer_id, actor_id, operation, key)
         return (row["request_digest"], row["result_ref"]) if row else None
 
+    async def find_request(self, customer_id, actor_id, key):
+        self._check_customer(customer_id, actor_id)
+        row = await self.connection.fetchrow("""SELECT request_digest, result_ref FROM ra_request_keys
+            WHERE customer_id=$1 AND actor_id=$2 AND operation='submit' AND key=$3""", customer_id, actor_id, key)
+        if row is None:
+            # Audio admission uses its durable input_id internally. The original
+            # caller only knows its upload key, including when the final input
+            # update failed after TaskService.submit had already committed.
+            row = await self.connection.fetchrow("""SELECT i.request_digest,
+                    coalesce(i.result_task_id,k.result_ref) AS result_ref
+                FROM ra_inputs i LEFT JOIN ra_request_keys k
+                    ON k.customer_id=i.customer_id AND k.actor_id=i.actor_id
+                    AND k.operation='submit' AND k.key=i.input_id
+                WHERE i.customer_id=$1 AND i.actor_id=$2 AND i.operation='audio' AND i.key=$3
+                    AND coalesce(i.result_task_id,k.result_ref) IS NOT NULL""", customer_id, actor_id, key)
+        return (row["request_digest"], row["result_ref"]) if row else None
+
     async def put_request(self, customer_id, actor_id, key, digest, task_id, operation="submit"):
         self._check_customer(customer_id, actor_id)
         await self.connection.execute("""INSERT INTO ra_request_keys
@@ -166,12 +217,16 @@ class TaskTransaction:
     async def insert_task(self, task):
         self._check_customer(task.customer_id, task.actor_id, task.actor_kind)
         await self.connection.execute("""INSERT INTO ra_tasks
-            (customer_id,task_id,actor_kind,actor_id,goal_text,state,reason_code,version,unit_id)
-            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)""", task.customer_id, task.task_id, task.actor_kind,
-                                      task.actor_id, task.goal_text, task.state, task.reason_code, task.version, task.unit_id)
+            (customer_id,task_id,actor_kind,actor_id,goal_text,state,reason_code,version,unit_id,error,advancement_stopped,cancel_result)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb,$11,$12::jsonb)""", task.customer_id, task.task_id, task.actor_kind,
+                                      task.actor_id, task.goal_text, task.state, task.reason_code, task.version, task.unit_id,
+                                      _json(task.error) if task.error else None, task.advancement_stopped,
+                                      _json(task.cancel_result) if task.cancel_result else None)
         self.loaded_versions[task.task_id] = task.version
 
     async def load_task(self, task_id, *, for_update=False, actor_scope=True):
+        if self.read_only and for_update:
+            raise ValueError("read snapshots cannot lock a task for writing")
         values = [task_id]
         scope = ""
         if self.context is not None:
@@ -180,8 +235,8 @@ class TaskTransaction:
             if actor_scope:
                 scope += " AND actor_id=$3 AND actor_kind=$4"
                 values += [self.context.actor_id, self.context.actor_kind]
-        row = await self.connection.fetchrow("SELECT * FROM ra_tasks WHERE task_id=$1" + scope
-                                              + (" FOR UPDATE" if for_update else " FOR SHARE"), *values)
+        lock = "" if self.read_only else " FOR UPDATE" if for_update else " FOR SHARE"
+        row = await self.connection.fetchrow("SELECT * FROM ra_tasks WHERE task_id=$1" + scope + lock, *values)
         if row is None:
             raise NotFoundError("object not found")
         plan, snapshot = None, None
@@ -202,7 +257,20 @@ class TaskTransaction:
         return Task(task_id, row["customer_id"], row["actor_kind"], row["actor_id"], row["goal_text"], row["state"],
                     row["reason_code"], row["version"], plan, snapshot, row["unit_id"], commands,
                     tuple(row["completed"]), row["clarification"], row["result_disputed"], row["clarification_id"], tuple(row["answers"]),
-                    row["cancel_requested"], row["resume_phase"])
+                    row["cancel_requested"], row["resume_phase"],
+                    self._task_error(row), row["advancement_stopped"],
+                    json.loads(row["cancel_result"]) if row["cancel_result"] else None)
+
+    @staticmethod
+    def _task_error(row):
+        if row["error"]:
+            return json.loads(row["error"])
+        if row["advancement_stopped"] and row["reason_code"]:
+            # Deterministic compatibility projection for historical records. Do
+            # not invent a new error id/time each time someone opens the page.
+            error = make_error(row["reason_code"])
+            return {**error, "error_id": "legacy:" + row["task_id"], "occurred_at": row["updated_at"].isoformat()}
+        return None
 
     async def load_facts(self, task_id, *, for_update):
         return await self.load_task(task_id, for_update=for_update)
@@ -224,10 +292,14 @@ class TaskTransaction:
                     raise ConflictError("plan version is immutable")
             status = await self.connection.execute("""UPDATE ra_tasks SET state=$1,reason_code=$2,active_plan_id=$3,
                 completed=$4,clarification=$5,result_disputed=$6,cancel_requested=$7,resume_phase=$8,version=$9,updated_at=clock_timestamp(),
-                clarification_id=$10,answers=$11 WHERE customer_id=$12 AND task_id=$13 AND version=$14""", task.state, task.reason_code,
+                clarification_id=$10,answers=$11,error=$15::jsonb,
+                advancement_stopped=advancement_stopped OR $16,cancel_result=$17::jsonb
+                WHERE customer_id=$12 AND task_id=$13 AND version=$14
+                AND (NOT advancement_stopped OR $16)""", task.state, task.reason_code,
                 task.plan.plan_id if task.plan else None, list(task.completed), task.clarification, task.result_disputed,
                 task.cancel_requested, task.resume_phase, task.version, task.clarification_id, list(task.answers),
-                task.customer_id, task.task_id, expected)
+                task.customer_id, task.task_id, expected, _json(task.error) if task.error else None,
+                task.advancement_stopped, _json(task.cancel_result) if task.cancel_result else None)
             if status != "UPDATE 1":
                 raise ConflictError("task version changed")
             if task.plan:

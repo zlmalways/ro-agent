@@ -17,7 +17,7 @@ def validate_plan(candidate: CandidatePlan, snapshot: ContextSnapshot, catalog: 
         if step.depends_on != required_dependencies:
             raise PlanError("invalid dependencies: serial chain required")
         if step.action not in catalog.required or step.action not in snapshot.allowed_actions or step.action not in snapshot.skills:
-            raise PlanError("unknown or unsupported action")
+            raise PlanError("ACTION_UNSUPPORTED", source="resources")
         required = catalog.required[step.action]
         if set(step.args) != set(required):
             raise PlanError("invalid action parameters")
@@ -27,12 +27,12 @@ def validate_plan(candidate: CandidatePlan, snapshot: ContextSnapshot, catalog: 
         if step.action == "move_to":
             ref = snapshot.waypoints.get(step.args["location"])
             if not ref:
-                raise PlanError("unverified waypoint")
+                raise PlanError("WAYPOINT_UNVERIFIED", source="resources")
             refs.append(ref)
         elif step.action == "vla_skill":
             ref = snapshot.brain_skills.get(step.args["skill_id"])
             if not ref:
-                raise PlanError("unverified skill")
+                raise PlanError("SKILL_UNVERIFIED", source="resources")
             refs.append(ref)
         else:
             raise PlanError("action grounding not configured")

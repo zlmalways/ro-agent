@@ -31,6 +31,7 @@
           <section class="board-panel" aria-labelledby="queue-title"><h2 id="queue-title">排队的任务</h2><div id="home-queue"></div></section>
         </div>
       </div>
+      <section class="board-panel error-panel" aria-labelledby="errors-title"><h2 id="errors-title">发生错误的任务</h2><div id="home-errors"></div></section>
       <p id="home-feedback" role="status"></p>
       <p id="home-sync" role="status"></p>
       <details class="home-archive"><summary>任务统计和最近记录</summary><div class="metrics">
@@ -61,7 +62,7 @@
           <span class="assistant-mark" aria-hidden="true">✦</span>
           <div class="assistant-content">
             <p class="status-line" role="status"><span id="status" class="badge"></span></p>
-            <p id="task-robots" class="hint"></p><p id="reason"></p><p id="question"></p>
+            <p id="task-robots" class="hint"></p><p id="reason"></p><div id="task-error-card" hidden></div><p id="cancel-result" class="hint" hidden></p><p id="question"></p>
             <form id="answer-form" hidden><label>澄清回答<input id="answer" required></label><button>提交回答</button></form>
             <div id="decisions" hidden><button id="approve">批准计划</button> <button id="reject" class="quiet">拒绝计划</button></div>
             <div id="execution-detail" hidden><h3>执行计划</h3><ol id="plan"></ol><h3>机器人执行反馈</h3><div id="results"></div></div>
@@ -72,17 +73,18 @@
       <div class="chat-footer">
         <div id="active-composer" class="chat-composer" hidden>
           <p id="composer-message">任务进行中，可以随时停止</p>
-          <div class="composer-actions"><small id="stop-hint">停止后不再继续这个任务</small><button id="cancel"><span aria-hidden="true">■</span> 停止</button><button id="followup-new" hidden>新任务</button></div>
+          <div class="composer-actions"><small id="stop-hint">停止后不再继续这个任务</small><button id="refresh-task" class="quiet" hidden>刷新任务状态</button><button id="cancel"><span aria-hidden="true">■</span> 停止</button><button id="followup-new" hidden>新任务</button></div>
         </div>
         <form id="submit-form" class="chat-composer"><label class="sr-only" for="goal">任务指令</label><textarea id="goal" rows="2" placeholder="描述你想让机器人做的事…" required></textarea><div class="composer-actions"><small>Enter 发送 · Shift + Enter 换行</small><button id="send" aria-label="提交任务" disabled>发送 ↑</button></div></form>
         <div id="voice-input"><details><summary>语音输入</summary>
           <label>语音文件<input id="audio" type="file" accept="audio/wav,.wav"></label>
           <button id="audio-submit" class="quiet">上传语音任务</button> <button id="record" class="quiet">开始录音</button>
           <span id="record-status" role="status"></span></details></div>
-        <p id="error" role="alert"></p><button id="retry-submit" class="quiet" hidden>重试确认提交结果</button>
+        <p id="error" role="alert"></p>
       </div>
     </section>
   </main>
+  <p id="task-alert" class="task-notification" role="status" aria-live="polite"></p>
   <button id="dock" hidden aria-label="打开任务对话" aria-expanded="false" aria-controls="conversation"><span class="dock-mark" aria-hidden="true">✦</span>描述你的目标，或与机器人对话… <kbd>Ctrl / ⌘ K</kbd></button>
   <script src="/client/audio.js" defer></script><script src="/client/home.js" defer></script><script src="/client/app.js" defer></script>
 </body></html>
