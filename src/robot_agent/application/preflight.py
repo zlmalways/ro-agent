@@ -28,6 +28,8 @@ class Preflight:
                                              for step in plan.steps)) if plan else candidate
         if not snapshot.robot_binding_id or not snapshot.skills:
             raise PreflightBlocked("CAPABILITY_UNKNOWN")
+        if snapshot.valid_until is not None and datetime.now(timezone.utc) >= snapshot.valid_until:
+            raise PreflightBlocked("RESOURCE_EXPIRED", source="resources", phase=phase)
         validated = validate_plan(value, snapshot, self.catalog)
         if plan and validated.steps != plan.steps:
             raise PreflightBlocked("RESOURCE_VERSION_CHANGED")

@@ -68,7 +68,7 @@ async def schedule(task: Task, candidates: Sequence[ContextSnapshot], tx, deploy
         return AllocationResult("waiting" if waiting else "blocked", own, reason)
     if own is None:
         for prior in await tx.prior_waiters(task):
-            if prior.cancel_requested or prior.result_disputed:
+            if prior.cancel_requested or prior.result_disputed or prior.advancement_stopped:
                 continue
             choice, _, _ = available_choice(prior, candidates, allocations)
             if choice and choice.robot_binding_id == snapshot.robot_binding_id:

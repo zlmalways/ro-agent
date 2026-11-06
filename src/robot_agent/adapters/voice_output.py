@@ -10,6 +10,8 @@ from robot_agent.domain.models import DependencyUnavailable
 def fact_message(view):
     if view.result_disputed:
         return "机器人执行结果存在冲突，请在网页核对。"
+    if view.error:
+        return view.error["message"] + "原任务已停止推进，请在网页查看指令执行结果。"
     if view.state == "NEEDS_CLARIFICATION":
         return view.clarification + "请在网页回答这个问题。"
     if view.state == "WAITING_APPROVAL":
@@ -18,7 +20,7 @@ def fact_message(view):
         steps = "；".join(row.get("description", row["action"]) for row in view.result_summary if row["outcome"] == "SUCCEEDED")
         return "机器人报告任务已完成。" + steps
     if view.state == "BLOCKED":
-        return "任务暂时暂停，执行条件或结果需要核对。请在网页查看详情。"
+        return "原任务已停止推进，执行条件或结果需要核对。请在网页查看详情。"
     if view.state == "CANCEL_REQUESTED":
         return "已请求取消后续任务，仍在等待机器人反馈，尚未确认物理停止。"
     if view.state == "CANCELLED":

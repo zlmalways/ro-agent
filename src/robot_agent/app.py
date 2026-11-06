@@ -6,6 +6,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pathlib import Path
 import sys
+import asyncpg
 
 from robot_agent.adapters.identity import ConfiguredIdentity
 from robot_agent.api.resources import router as resources_router, web_context
@@ -13,6 +14,7 @@ from robot_agent.api.robot_ws import router as robot_router
 from robot_agent.api.tasks import router as tasks_router
 from robot_agent.api.voice import router as voice_router
 from robot_agent.domain.models import DependencyUnavailable, PreflightBlocked
+from robot_agent.domain.errors import make_error
 
 
 def create_app(*, service=None, identity=None, resources=None, inputs=None):
@@ -44,7 +46,16 @@ def create_app(*, service=None, identity=None, resources=None, inputs=None):
     @app.exception_handler(DependencyUnavailable)
     @app.exception_handler(PreflightBlocked)
     async def dependency_error(request: Request, exc):
-        return JSONResponse(status_code=503, content={"detail": str(exc)})
+        error = make_error(exc)
+        return JSONResponse(status_code=503, content={"detail": error["code"], "error": error})
+
+    @app.exception_handler(asyncpg.PostgresError)
+    @app.exception_handler(asyncpg.InterfaceError)
+    @app.exception_handler(asyncpg.InternalClientError)
+    @app.exception_handler(OSError)
+    async def persistence_error(request: Request, exc):
+        error = make_error("PERSISTENCE_UNCONFIRMED", source="runtime", phase="persistence")
+        return JSONResponse(status_code=503, content={"detail": error["code"], "error": error})
 
     @app.get("/api/robot-agent/session")
     async def session_identity(request: Request):
@@ -54,6 +65,7 @@ def create_app(*, service=None, identity=None, resources=None, inputs=None):
     @app.get("/health")
     async def health():
         ready = app.state.service is not None
+        ready = ready and getattr(getattr(app.state.service, "store", None), "write_available", True)
         runtime = getattr(app.state, "runtime", None)
         if runtime is not None:
             ready = ready and not runtime.error and runtime.loop_task is not None and not runtime.loop_task.done()

@@ -71,6 +71,14 @@ async def home_tasks(request: Request):
     return await request.app.state.service.home_tasks(context)
 
 
+@router.get("/api/robot-agent/task-requests/{request_key}")
+async def request_result(request_key: str, request: Request):
+    from .resources import web_context
+    context = await web_context(request)
+    view = await request.app.state.service.request_result(context, request_key)
+    return {"found": True, "task": asdict(view)} if view else {"found": False, "request_key": request_key}
+
+
 @router.get("/api/robot-agent/tasks/{task_id}")
 async def get_task(task_id: str, request: Request):
     auth = request.headers.get("authorization", "")

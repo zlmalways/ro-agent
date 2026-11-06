@@ -97,17 +97,21 @@ class Resources:
             return []
         connections = self.connected_robots(context.customer_id)
         snapshots = []
+        unavailable = []
         for binding_id, generation in connections.items():
             try:
                 snapshot = await self.snapshot(context, binding_id)
             except DependencyUnavailable as exc:
                 if not isinstance(exc, RobotReportError) and str(exc) != "ROBOT_BINDING_UNAVAILABLE":
                     raise
+                unavailable.append(exc)
                 continue
             if snapshot.generation == generation:
                 snapshots.append(snapshot)
         # Database reads yield control: a connection may have disappeared or been replaced.
         current = self.connected_robots(context.customer_id)
+        if not snapshots and unavailable:
+            raise unavailable[0]
         return [snapshot for snapshot in snapshots
                 if current.get(snapshot.robot_binding_id) == snapshot.generation]
 

@@ -279,7 +279,7 @@ async def test_network_error_preserves_loaded_history(dashboard):
     await expect(page.locator("#history")).to_contain_text("keep on disconnect")
 
 
-async def test_lost_submit_body_allows_manual_replay_with_original_key(dashboard):
+async def test_lost_submit_body_queries_original_key_without_reposting(dashboard):
     page, service, _ = dashboard
     keys = []
 
@@ -295,15 +295,18 @@ async def test_lost_submit_body_allows_manual_replay_with_original_key(dashboard
             await route.fulfill(response=response)
 
     await page.route("**/api/robot-agent/tasks", lose_first_response)
+    await page.route("**/api/robot-agent/task-requests/**", lambda route: route.abort())
     await page.locator("#compose").click()
     await page.locator("#goal").fill("send once")
     await page.locator("#send").click()
     await expect(page.locator("#error")).to_contain_text("请求编号")
     assert len(keys) == 1 and keys[0] in await page.locator("#error").inner_text()
-    await page.locator("#retry-submit").click()
+    await expect(page.locator("#retry-submit")).to_have_count(0)
+    await page.unroute("**/api/robot-agent/task-requests/**")
+    await page.locator("#refresh-task").click()
     await expect(page.locator("#task-id")).not_to_have_text("")
     await expect(page.locator("#task-goal")).to_have_text("send once")
-    assert keys == [keys[0], keys[0]]
+    assert len(keys) == 1
     assert await service.store.pool.fetchval("SELECT count(*) FROM ra_tasks") == 1
 
 
@@ -358,7 +361,7 @@ async def test_mobile_pages_fleet_and_keyboard(dashboard, tmp_path):
     await page.screenshot(path=str(tmp_path / "fleet-mobile.png"))
 
 
-async def test_recording_response_lost_can_replay_same_wav_without_recording_again(dashboard):
+async def test_recording_response_lost_queries_original_key_without_reupload(dashboard):
     page, service, asr = dashboard
     keys = []
 
@@ -371,6 +374,7 @@ async def test_recording_response_lost_can_replay_same_wav_without_recording_aga
             await route.fulfill(response=response)
 
     await page.route("**/api/robot-agent/tasks/audio", lose_first_ack)
+    await page.route("**/api/robot-agent/task-requests/**", lambda route: route.abort())
     await page.locator("#dock").click()
     await page.get_by_text("语音输入", exact=True).click()
     await page.locator("#record").click()
@@ -378,9 +382,11 @@ async def test_recording_response_lost_can_replay_same_wav_without_recording_aga
     await page.wait_for_timeout(400)
     await page.locator("#record").click()
     await expect(page.locator("#error")).to_contain_text("请求编号")
-    await page.locator("#retry-submit").click()
+    await expect(page.locator("#retry-submit")).to_have_count(0)
+    await page.unroute("**/api/robot-agent/task-requests/**")
+    await page.locator("#refresh-task").click()
     await expect(page.locator("#task-goal")).to_have_text("test: spoken goal")
-    assert keys == [keys[0], keys[0]]
+    assert len(keys) == 1
     assert len(asr.received) == 1
     assert await service.store.pool.fetchval("SELECT count(*) FROM ra_tasks") == 1
 
@@ -421,7 +427,7 @@ async def test_running_task_cancelled_by_robot_ends_in_dashboard(dashboard):
                                            cmd.dispatch_generation, cmd.command_id, "running"))
     await expect(page.locator("#results")).to_contain_text("机器人正在执行")
     await page.locator("#cancel").click()
-    await expect(page.locator("#status")).to_have_text("正在停止，等待机器人确认")
+    await expect(page.locator("#status")).to_have_text("等待机器人确认停止")
     await service.on_robot_event(RobotEvent("stopped", cmd.customer_id, cmd.robot_binding_id,
                                            cmd.dispatch_generation, cmd.command_id, "failed"))
     await expect(page.locator("#status")).to_have_text("已停止")
@@ -430,7 +436,7 @@ async def test_running_task_cancelled_by_robot_ends_in_dashboard(dashboard):
     assert len(service.robot.sent) == 1
 
 
-async def test_lost_stop_reply_retries_same_request_without_claiming_success(dashboard):
+async def test_lost_stop_reply_refreshes_without_sending_cancel_again(dashboard):
     page, service, _ = dashboard
     await submit(page, "停止回执丢失")
     task_id = await page.locator('#task-id').text_content()
@@ -447,10 +453,11 @@ async def test_lost_stop_reply_retries_same_request_without_claiming_success(das
     await page.route('**/api/robot-agent/tasks/' + task_id, lambda route: route.abort())
     await page.route('**/api/robot-agent/tasks/' + task_id + '/cancel', lose_first_reply)
     await page.locator('#cancel').click()
-    await expect(page.locator('#error')).to_contain_text('停止尚未确认')
+    await expect(page.locator('#error')).to_contain_text('停止请求结果未确认')
     await expect(page.locator('#status')).not_to_have_text('已停止')
-    await expect(page.locator('#cancel')).to_be_enabled()
-    await page.locator('#cancel').click()
+    await expect(page.locator('#cancel')).to_be_hidden()
+    await page.unroute('**/api/robot-agent/tasks/' + task_id)
+    await page.locator('#refresh-task').click()
     await expect(page.locator('#status')).to_have_text('已停止')
-    assert len(keys) == 2 and keys[0] == keys[1]
+    assert len(keys) == 1
     assert await service.store.pool.fetchval("SELECT count(*) FROM ra_task_events WHERE event_type='cancel_requested'") == 1

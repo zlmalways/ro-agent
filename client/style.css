@@ -501,6 +501,11 @@ body.chat-open main > header, body.chat-open main > section:not(#conversation) {
 #chat-empty h2 { font-size: 27px; }
 #chat-empty p { color: var(--muted); }
 #task-detail { max-width: 830px; width: 100%; margin: 30px auto; }
+#conversation-history { max-width: 830px; width: 100%; margin: 0 auto; }
+#conversation-history:empty { display: none; }
+.conversation-turn { margin: 30px 0; padding-bottom: 24px; border-bottom: 1px solid var(--line); }
+.previous-task-note { color: var(--muted); font-size: 12px; margin-bottom: 18px; }
+#continuation-note { margin: 0 0 12px; font-size: 13px; }
 .user-message { width: fit-content; max-width: 85%; margin-left: auto; padding: 13px 19px; background: var(--tint); border-radius: 17px 17px 4px 17px; white-space: pre-wrap; overflow-wrap: anywhere; }
 .user-message small { display: block; text-align: right; font-size: 12px; margin-top: 6px; }
 .assistant-message { display: grid; grid-template-columns: 30px minmax(0,1fr); gap: 14px; margin-top: 32px; }
@@ -541,3 +546,35 @@ body.chat-open main > header, body.chat-open main > section:not(#conversation) {
 .robot-list button { text-align:left; overflow-wrap:anywhere; }
 .robot-list button[aria-pressed="true"] { background:#eef0ff; border-color:#494fc1; color:#363ca6; }
 #task-robots { overflow-wrap:anywhere; }
+
+/* Persisted task errors share one presentation in chat, history, and home. */
+.error-panel { margin-top: 16px; }
+.task-error-card { border: 1px solid var(--line); border-radius: 12px; padding: 20px; background: var(--paper); min-width: 0; overflow-wrap: anywhere; }
+.task-error-card h3 { margin: 0 0 8px; font-size: 17px; }
+.task-error-card .error-message { margin: 0; color: var(--ink); }
+.error-facts { margin: 18px 0; padding: 12px 14px; border-radius: 8px; background: #f6f7fb; grid-template-columns: 72px minmax(0, 1fr); gap: 8px 12px; }
+.error-facts dd { color: var(--ink); }
+.error-details { border-top: 1px solid var(--line); padding-top: 12px; }
+.error-details summary { width: fit-content; color: var(--brand); cursor: pointer; min-height: 32px; }
+.error-records { margin: 10px 0 0; font-size: 13px; grid-template-columns: 72px minmax(0, 1fr); gap: 8px 12px; }
+.error-records dd { font-family: ui-monospace, Consolas, monospace; }
+.task-error-card .error-footnote { margin: 14px 0 0; color: var(--muted); font-size: 12px; }
+.error-badge { background: #fff0f0; color: #a02d31; }
+.task-notification { position: fixed; z-index: 5; right: 20px; bottom: 20px; width: min(460px, calc(100vw - 40px)); margin: 0; padding: 14px 18px; border: 1px solid #e8c9cc; border-radius: 12px; background: #fff7f7; color: #8f3035; box-shadow: 0 4px 18px #31395e16; }
+.task-notification:empty { display: none; }
+.task-row-error { display: grid; grid-template-columns: minmax(0, 1fr) auto; }
+.task-row-error > .task-open { grid-column: 1; }
+.task-row-error > .task-error-card { grid-column: 1 / -1; grid-row: 2; }
+.task-row-error > .task-stop { grid-column: 2; grid-row: 1; }
+#cancel-result { padding: 10px 12px; border-left: 2px solid var(--line); background: #f6f7fb; overflow-wrap: anywhere; }
+.composer-actions { flex-wrap: wrap; }
+.composer-actions > small { flex: 1 1 190px; }
+.board-panel .task-error-card { padding: 16px; margin-top: 10px; }
+@media(max-width:500px) {
+  .task-error-card { padding: 16px; }
+  .error-facts { grid-template-columns: 1fr; gap: 3px; }
+  .error-facts dd + dt { margin-top: 6px; }
+  .error-details summary { min-height: 44px; display: flex; align-items: center; }
+  .composer-actions > small { flex-basis: 100%; }
+  .composer-actions button { min-height: 44px; }
+}

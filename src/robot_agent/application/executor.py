@@ -10,7 +10,7 @@ from robot_agent.domain.transitions import check_transition
 class Executor:
     def prepare(self, context, unit, facts):
         task = facts
-        if task.state not in {"READY", "QUEUED", "RUNNING"} or task.result_disputed:
+        if task.state not in {"READY", "QUEUED", "RUNNING"} or task.result_disputed or task.advancement_stopped:
             return ChangeSet(task)
         if any(item.outcome not in {"SUCCEEDED", "FAILED"} for item in task.commands):
             return ChangeSet(task)
