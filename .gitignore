@@ -8,3 +8,8 @@ __pycache__/
 *.egg-info/
 build/
 dist/
+
+# Local development database, credentials, logs and machine-specific config.
+/test-db/
+/config/dev.local.json
+/config/dev.e2e.local.json

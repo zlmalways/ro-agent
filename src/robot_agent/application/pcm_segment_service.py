@@ -7,8 +7,11 @@ model creation/feed in a worker, not on the socket event loop.
 
 from collections import deque
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 import io
+import logging
 import math
+from pathlib import Path
 import time
 from typing import Literal, Protocol
 from uuid import uuid4
@@ -19,6 +22,8 @@ from robot_agent.config import PcmSegmentConfig, load_pcm_segment_config
 
 _WINDOW_BYTES = 1024  # 512 signed 16-bit samples = 32 ms at 16 kHz
 _WINDOW_MS = 32
+_RECORDING_TIMEZONE = timezone(timedelta(hours=8), name="Asia/Shanghai")
+log = logging.getLogger(__name__)
 
 
 class Vad(Protocol):
@@ -67,10 +72,13 @@ def _silero_vad():
 
 
 class PcmSegmentService:
-    def __init__(self, config: PcmSegmentConfig | None = None, *, vad_factory=None):
+    def __init__(self, config: PcmSegmentConfig | None = None, *, vad_factory=None, wav_save_dir=None):
         self.config = config if config is not None else load_pcm_segment_config()
         self._vad_factory = vad_factory if vad_factory is not None else _silero_vad
         self._owner = object()
+        if wav_save_dir is not None and (not isinstance(wav_save_dir, (str, Path)) or not str(wav_save_dir).strip()):
+            raise ValueError("wav_save_dir must be a non-empty path when configured")
+        self._wav_save_dir = Path(wav_save_dir).expanduser() if wav_save_dir is not None else None
         self._silence = math.ceil(self.config.silence_ms / _WINDOW_MS)
         self._minimum = math.ceil(self.config.min_speech_ms / _WINDOW_MS)
         self._maximum = self.config.max_segment_ms // _WINDOW_MS
@@ -178,6 +186,22 @@ class PcmSegmentService:
                 events.append(segment)
         return events
 
+    def _save_wav(self, segment_id: str, wav_bytes: bytes) -> None:
+        """Save a completed segment without making persistence a processing gate."""
+        if self._wav_save_dir is None:
+            return
+        now = datetime.now(timezone.utc).astimezone(_RECORDING_TIMEZONE)
+        day_dir = self._wav_save_dir / now.strftime("%Y-%m-%d")
+        path = day_dir / f"{now:%Y%m%d_%H%M%S_%f}_{segment_id}.wav"
+        try:
+            day_dir.mkdir(parents=True, exist_ok=True)
+            with path.open("xb") as output:
+                output.write(wav_bytes)
+        except OSError:
+            log.exception("PCM WAV save failed segment=%s path=%s", segment_id, path)
+            return
+        log.info("PCM WAV saved segment=%s path=%s bytes=%d", segment_id, path, len(wav_bytes))
+
     def _finish(self, session, reason):
         windows, speech_windows = session._windows, session._speech_windows
         continuing = session._continuing
@@ -202,4 +226,6 @@ class PcmSegmentService:
             audio.setsampwidth(2)
             audio.setframerate(16000)
             audio.writeframes(b"".join(windows))
-        return AudioSegment(segment_id, output.getvalue(), len(windows) * _WINDOW_MS, reason)
+        wav_bytes = output.getvalue()
+        self._save_wav(segment_id, wav_bytes)
+        return AudioSegment(segment_id, wav_bytes, len(windows) * _WINDOW_MS, reason)

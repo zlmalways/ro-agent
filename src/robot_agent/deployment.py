@@ -30,6 +30,9 @@ def _pcm_settings(configuration):
         raise ValueError("voice_pcm.enabled, submit_tasks and evaluate_wake must be booleans")
     if (settings.get("submit_tasks") or settings.get("evaluate_wake")) and not settings.get("enabled"):
         raise ValueError("PCM processing requires PCM capture to be enabled")
+    wav_save_dir = settings.get("wav_save_dir")
+    if wav_save_dir is not None and (not isinstance(wav_save_dir, str) or not wav_save_dir.strip()):
+        raise ValueError("voice_pcm.wav_save_dir must be a non-empty string when configured")
     return settings
 
 
@@ -40,7 +43,7 @@ def build_pcm_segments(configuration, environment):
         return None
     from robot_agent.application.pcm_segment_service import PcmSegmentService
     from robot_agent.config import load_pcm_segment_config
-    return PcmSegmentService(load_pcm_segment_config(environment))
+    return PcmSegmentService(load_pcm_segment_config(environment), wav_save_dir=settings.get("wav_save_dir"))
 
 
 def build_pcm_voice(configuration, inputs):
