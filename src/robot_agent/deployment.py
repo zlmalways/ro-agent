@@ -158,8 +158,10 @@ def build_app(configuration, *, environment=None):
             resources = Resources(store, freshness_seconds=limits["freshness_seconds"],
                                   max_entries=limits["max_resource_entries"], use_reported_waypoints=use_reported_waypoints,
                                   missing_credentials=missing_credentials)
-            planner = OpenAICompatiblePlanner(load_provider_config(environment) if configuration.get("allow_external_calls") is True else None,
-                                              max_response_bytes=limits["provider_response_bytes"])
+            planner = OpenAICompatiblePlanner(
+                load_provider_config(environment) if configuration.get("allow_external_calls") is True else None,
+                max_response_bytes=limits["provider_response_bytes"],
+                history_loader=store.conversation_messages)
             asr = build_asr(configuration, environment)
             owner = RuntimeOwnership(dsn=dsn, deployment_id=deployment["id"], host_id=deployment["host_id"],
                                      lock_path=deployment["lock_path"], advisory_key=deployment["advisory_key"],

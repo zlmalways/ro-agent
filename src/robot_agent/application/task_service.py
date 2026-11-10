@@ -27,7 +27,8 @@ def step_description(action, args, labels):
 
 
 def task_view(task, allocation_robot_binding_id=None):
-    return TaskView(task.task_id, task.version, task.state, task.reason_code,
+    conversation_id = task.conversation_id or task.task_id
+    return TaskView(conversation_id, task.version, task.state, task.reason_code,
                     task.plan.plan_id if task.plan else None, task.clarification, task.result_disputed,
                     tuple({"command_id": command.command_id, "step_id": command.step_id,
                            "robot_binding_id": command.robot_binding_id, "action": command.wire_skill,
@@ -43,7 +44,8 @@ def task_view(task, allocation_robot_binding_id=None):
                           for step in task.plan.steps) if task.plan else (), goal_text=task.goal_text,
                     allocation_robot_binding_id=allocation_robot_binding_id,
                     plan_robot_binding_id=task.snapshot.robot_binding_id if task.plan and task.snapshot else None,
-                    error=public_error(task), advancement_stopped=task.advancement_stopped, cancel_result=task.cancel_result)
+                    error=public_error(task), advancement_stopped=task.advancement_stopped, cancel_result=task.cancel_result,
+                    turn_id=task.task_id, turn_seq=task.turn_seq or 1)
 
 
 @dataclass
@@ -76,7 +78,23 @@ class TaskService:
         self._closing = False
 
     async def view_in_transaction(self, tx, task):
-        return task_view(task, await tx.task_allocation_binding(task))
+        view = task_view(task, await tx.task_allocation_binding(task))
+        if hasattr(tx, "conversation_messages"):
+            messages = list(await tx.conversation_messages(task.conversation_id or task.task_id))
+        else:
+            messages = []
+        if not messages:
+            messages = [{"message_id": "legacy:" + task.task_id, "turn_id": task.task_id, "seq": 1,
+                         "role": "user", "message_kind": "user_text", "content": task.goal_text}]
+        if task.clarification and not any(item.get("message_kind") == "clarify" for item in messages):
+            messages.append({"message_id": "legacy:" + task.task_id + ":clarify", "turn_id": task.task_id,
+                             "seq": len(messages) + 1, "role": "assistant", "message_kind": "clarify",
+                             "content": task.clarification})
+        if task.reason_code == "UNSUPPORTED" and not any(item.get("message_kind") == "unsupported" for item in messages):
+            messages.append({"message_id": "legacy:" + task.task_id + ":unsupported", "turn_id": task.task_id,
+                             "seq": len(messages) + 1, "role": "assistant", "message_kind": "unsupported",
+                             "content": "当前能力无法完成这个任务。"})
+        return replace(view, messages=tuple(messages))
 
     async def _persist(self, tx, change):
         """Single task-write policy for every channel and execution entry point."""
@@ -103,19 +121,65 @@ class TaskService:
                 task = await tx.load_task(existing[1], for_update=True)
                 return await self.view_in_transaction(tx, task)
             else:
-                task = Task(str(uuid4()), context.customer_id, context.actor_kind, context.actor_id, value.text,
-                            state="RECEIVED", unit_id=str(uuid4()))
+                conversation_id = str(uuid4())
+                task = Task(conversation_id, context.customer_id, context.actor_kind, context.actor_id, value.text,
+                            state="RECEIVED", unit_id=str(uuid4()), conversation_id=conversation_id, turn_seq=1)
                 await tx.insert_task(task)
+                if hasattr(tx, "append_message"):
+                    await tx.append_message(context.customer_id, conversation_id, task.task_id,
+                                            "user", "user_text", value.text, request_key=request_key)
                 await tx.put_request(context.customer_id, context.actor_id, request_key, digest, task.task_id)
                 await tx.append_event(task.task_id, TaskEvent("received", {"state": task.state}))
         if wait_for_plan:
             # Legacy robot voice replies include a planning question or approval
             # notice. This changes response timing only, not admission/scheduling.
             await self.schedule_pending(self.store.deployment_id, task_id=task.task_id)
-            return await self.get(context, task.task_id)
+            return await self.get(context, task.conversation_id or task.task_id)
         # Admission is committed before replying. The existing durable runtime scans
         # RECEIVED tasks; no model/network work belongs to this HTTP round trip.
-        return task_view(task)
+        return await self.get(context, task.conversation_id or task.task_id)
+
+    async def message(self, context, conversation_id, value, request_key):
+        """Append a user message to a conversation and start its next turn."""
+        if not value.text.strip() or not request_key:
+            raise PlanError("empty message/request key")
+        if self.max_text_chars is not None and len(value.text) > self.max_text_chars:
+            raise PlanError("TEXT_LIMIT_EXCEEDED")
+        digest = sha256(json.dumps({"channel": value.channel, "text": value.text,
+                                    "source_ref": value.source_ref, "conversation_id": conversation_id},
+                                   sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+        target_id = None
+        async with self.store.unit_of_work(context) as tx:
+            existing = await tx.get_request(context.customer_id, context.actor_id, request_key, "message")
+            if existing:
+                if existing[0] != digest:
+                    raise ConflictError("request key content conflict")
+                return await self.view_in_transaction(tx, await tx.conversation_task(conversation_id, actor_scope=False))
+            current = await tx.conversation_task(conversation_id, for_update=True)
+            if current.customer_id != context.customer_id or current.actor_id != context.actor_id:
+                raise NotFoundError("object not found")
+            if current.state == "NEEDS_CLARIFICATION":
+                changed = replace(current, state="RECEIVED", reason_code="", resume_phase="",
+                                  clarification="", clarification_id="", answers=current.answers + (value.text,),
+                                  error=None, advancement_stopped=False, cancel_requested=False,
+                                  cancel_result=None, version=current.version + 1)
+                await tx.append_message(current.customer_id, current.conversation_id or current.task_id,
+                                        current.task_id, "user", "user_text", value.text, request_key=request_key)
+                await self._persist(tx, ChangeSet(changed))
+                await tx.put_request(context.customer_id, context.actor_id, request_key, digest,
+                                     current.task_id, "message")
+                await tx.append_event(current.task_id, TaskEvent("message_received", {"state": changed.state}))
+                target_id = current.task_id
+            elif current.state in {"SUCCEEDED", "FAILED", "CANCELLED"} or current.advancement_stopped:
+                next_task = await tx.start_turn(current, value.text, message_id=None)
+                await tx.put_request(context.customer_id, context.actor_id, request_key, digest,
+                                     next_task.task_id, "message")
+                await tx.append_event(next_task.task_id, TaskEvent("received", {"state": next_task.state}))
+                target_id = next_task.task_id
+            else:
+                raise ConflictError("conversation has an active turn")
+        await self.schedule_pending(self.store.deployment_id, task_id=target_id, wait_for_plan=False)
+        return await self.get(context, conversation_id)
 
     def _watch_work(self, job, registry, key, entry):
         def finished(done):
@@ -292,15 +356,25 @@ class TaskService:
     async def _generate_plan(self, task, snapshot, *, work):
         context = TrustedContext(task.customer_id, task.actor_kind, task.actor_id)
         records = ()
+        assistant_message = None
         try:
-            candidate = await self.planner.plan(task.goal_text, list(task.answers), snapshot)
+            planner_call = getattr(self.planner, "call_llm", None)
+            if planner_call is not None:
+                candidate = await planner_call(task.conversation_id or task.task_id, snapshot,
+                                               turn_id=task.task_id)
+            else:
+                # Compatibility for old development fixtures.  The production
+                # adapter uses call_llm and never reconstructs context from answers.
+                candidate = await self.planner.plan(task.goal_text, list(task.answers), snapshot)
             if self.max_plan_steps is not None and len(candidate.steps) > self.max_plan_steps:
                 raise PlanError("PLAN_LIMIT_EXCEEDED")
             if candidate.outcome == "clarify":
                 changed = replace(task, state="NEEDS_CLARIFICATION", clarification=candidate.question,
                                   clarification_id=str(uuid4()))
+                assistant_message = ("clarify", candidate.question)
             elif candidate.outcome == "unsupported":
                 changed = replace(task, state="FAILED", reason_code="UNSUPPORTED")
+                assistant_message = ("unsupported", candidate.reason or "当前能力无法完成这个任务。")
             else:
                 check = await self.preflight.check(context, candidate, snapshot, "planning")
                 state = {"allow": "READY", "deny": "FAILED", "require_confirmation": "WAITING_APPROVAL",
@@ -315,6 +389,7 @@ class TaskService:
         if self.ownership is not None and not await self.ownership.healthy():
             changed = replace(task, state="BLOCKED", reason_code="OWNERSHIP_UNAVAILABLE", resume_phase="PLANNING")
             records = ()
+            assistant_message = None
         if changed.state in {"BLOCKED", "FAILED"}:
             changed = stop_task(changed, phase="planning")
         # Once the final write starts, let it finish and report any error; cleanup
@@ -330,6 +405,9 @@ class TaskService:
                 return  # Cancellation/recovery won; never resurrect it or release a later task's slot.
             changed = replace(changed, version=current.version + 1)
             await self._persist(tx, ChangeSet(changed, decisions=records))
+            if assistant_message:
+                await tx.append_message(current.customer_id, current.conversation_id or current.task_id,
+                                        current.task_id, "assistant", assistant_message[0], assistant_message[1])
             await tx.append_event(task.task_id, TaskEvent("planned", {"state": changed.state, "reason_code": changed.reason_code}))
             if changed.state != "READY":
                 await self._release_unstarted(tx, changed)
@@ -353,7 +431,7 @@ class TaskService:
         digest = sha256(json.dumps([task_id, expected_version]).encode()).hexdigest()
         async with self.store.system_unit_of_work() as tx:
             existing = await tx.get_request(context.customer_id, context.actor_id, request_key, "cancel")
-            task = await tx.load_task(task_id, for_update=True)
+            task = await tx.conversation_task(task_id, for_update=True)
             if task.customer_id != context.customer_id or task.actor_id != context.actor_id:
                 raise NotFoundError("object not found")
             if existing:
@@ -363,7 +441,7 @@ class TaskService:
             if task.cancel_requested:
                 # A new HTTP idempotency key never creates another physical stop
                 # attempt for the same task. Preserve the first delivery result.
-                await tx.put_request(context.customer_id, context.actor_id, request_key, digest, task_id, "cancel")
+                await tx.put_request(context.customer_id, context.actor_id, request_key, digest, task.task_id, "cancel")
                 return await self.view_in_transaction(tx, task)
             if task.version != expected_version:
                 raise ConflictError("task version changed")
@@ -381,8 +459,8 @@ class TaskService:
                                               else "后续步骤已结束，当前没有等待回执的执行指令。"),
                                   "occurred_at": datetime.now(timezone.utc).isoformat()})
             await self._persist(tx, ChangeSet(changed))
-            await tx.put_request(context.customer_id, context.actor_id, request_key, digest, task_id, "cancel")
-            await tx.append_event(task_id, TaskEvent("cancel_requested", {"state": changed.state}))
+            await tx.put_request(context.customer_id, context.actor_id, request_key, digest, task.task_id, "cancel")
+            await tx.append_event(task.task_id, TaskEvent("cancel_requested", {"state": changed.state}))
             if not in_flight:
                 await self._release_unstarted(tx, changed)
         if in_flight:
@@ -398,7 +476,7 @@ class TaskService:
                        "NOT_SENT": "停止请求未能发送，尚未确认机器人停止。",
                        "UNKNOWN": "停止请求是否送达尚未确认，尚未确认机器人停止。"}[status]
             async with self.store.system_unit_of_work() as tx:
-                current = await tx.load_task(task_id, for_update=True)
+                current = await tx.load_task(task.task_id, for_update=True)
                 changed = replace(current, version=current.version + 1, cancel_result={
                     "status": status, "code": "CANCEL_SENT" if observation.sent else error_code(observation.reason_code, "SEND_FAILED"),
                     "message": message, "occurred_at": datetime.now(timezone.utc).isoformat()})
@@ -407,10 +485,10 @@ class TaskService:
                     changed = stop_task(replace(changed, reason_code=current.reason_code or code), code,
                                         source=observation.source, phase="cancel", command=in_flight)
                 await self._persist(tx, ChangeSet(changed))
-                await tx.append_event(task_id, TaskEvent("cancel_delivery", dict(changed.cancel_result)))
+                await tx.append_event(task.task_id, TaskEvent("cancel_delivery", dict(changed.cancel_result)))
         else:
             await self._cancel_invalid_planning()
-        return await self.get(context, changed.task_id)
+        return await self.get(context, changed.conversation_id or changed.task_id)
 
     async def answer(self, context, task_id, clarification_id, answer, expected_version, request_key):
         if not answer.strip() or not request_key:
@@ -422,16 +500,19 @@ class TaskService:
                 if existing[0] != digest:
                     raise ConflictError("request key content conflict")
                 return await self.view_in_transaction(tx, await tx.load_task(existing[1]))
-            task = await tx.load_task(task_id, for_update=True)
+            task = await tx.conversation_task(task_id, for_update=True)
             if task.version != expected_version or task.state != "NEEDS_CLARIFICATION" or task.advancement_stopped or task.clarification_id != clarification_id:
                 raise ConflictError("clarification version changed")
             changed = replace(task, state="RECEIVED", answers=task.answers + (answer,), clarification="",
                               clarification_id="", reason_code="", resume_phase="", version=task.version + 1)
+            await tx.append_message(task.customer_id, task.conversation_id or task.task_id, task.task_id,
+                                    "user", "user_text", answer, request_key=request_key)
             await self._persist(tx, ChangeSet(changed))
-            await tx.put_request(context.customer_id, context.actor_id, request_key, digest, task_id, "answer")
-            await tx.append_event(task_id, TaskEvent("clarification_answered", {"state": changed.state}))
+            await tx.put_request(context.customer_id, context.actor_id, request_key, digest, task.task_id, "answer")
+            await tx.append_event(task.task_id, TaskEvent("clarification_answered", {"state": changed.state}))
         # A clarification is also durable input, not a request to wait for the model.
-        return await self.get(context, changed.task_id)
+        await self.schedule_pending(self.store.deployment_id, task_id=changed.task_id, wait_for_plan=False)
+        return await self.get(context, changed.conversation_id or changed.task_id)
 
     async def dispatch_next(self, deployment_id, *, wait_for_send=True):
         if self._closing or not getattr(self.store, "write_available", True) or self.queue_policy is None or self.ownership is None or not await self.ownership.healthy():
@@ -689,7 +770,7 @@ class TaskService:
                 if existing[0] != digest:
                     raise ConflictError("request key content conflict")
                 return await self.view_in_transaction(tx, await tx.load_task(existing[1]))
-            task = await tx.load_task(task_id)
+            task = await tx.conversation_task(task_id)
             approvals = await tx.approvals(task) if task.plan else []
         if task.customer_id != context.customer_id:
             raise NotFoundError("object not found")
@@ -729,19 +810,19 @@ class TaskService:
                 if existing[0] != digest:
                     raise ConflictError("request key content conflict")
                 return await self.view_in_transaction(tx, await tx.load_task(existing[1]))
-            current = await tx.load_task(task_id, for_update=True)
+            current = await tx.conversation_task(task_id, for_update=True)
             if current.version != expected_version:
                 raise ConflictError("task version changed")
             changed = replace(current, state=state, reason_code=reason, version=current.version + 1)
             if failure is not None:
                 changed = stop_task(changed, failure, phase="approval", fallback=reason)
             await self._persist(tx, ChangeSet(changed, decisions=records))
-            await tx.put_request(context.customer_id, context.actor_id, request_key, digest, task_id, "decide")
-            await tx.append_event(task_id, TaskEvent("decision", {"decision": decision, "state": state}))
+            await tx.put_request(context.customer_id, context.actor_id, request_key, digest, task.task_id, "decide")
+            await tx.append_event(current.task_id, TaskEvent("decision", {"decision": decision, "state": state}))
         if changed.state == "READY":
-            await self.schedule_pending(self.store.deployment_id, task_id=task_id)
-            return await self.get(context, task_id)
-        return await self.get(context, changed.task_id)
+            await self.schedule_pending(self.store.deployment_id, task_id=current.task_id)
+            return await self.get(context, current.conversation_id or current.task_id)
+        return await self.get(context, current.conversation_id or current.task_id)
 
     async def on_robot_connected(self, binding, frame):
         async with self.store.system_unit_of_work() as tx:
@@ -921,7 +1002,7 @@ class TaskService:
         async with self.store.read_snapshot(context) as tx:
             rows = await tx.home_task_rows()
             # Rows already passed the shared customer/owner/robot visibility filter.
-            views = {row["task_id"]: await self.view_in_transaction(tx, await tx.load_task(row["task_id"], actor_scope=False)) for row in rows}
+            views = {row["task_id"]: await self.view_in_transaction(tx, await tx.load_task(row["turn_id"], actor_scope=False)) for row in rows}
         result = []
         for row in rows:
             item = dict(row)
@@ -945,7 +1026,7 @@ class TaskService:
             rows, state_counts = await tx.owner_history(limit + 1, before)
             # Keep the same visibility when adding persisted error details.
             for row in rows:
-                task = await tx.load_task(row["task_id"], actor_scope=False)
+                task = await tx.load_task(row["turn_id"], actor_scope=False)
                 row.update(error=public_error(task), advancement_stopped=task.advancement_stopped,
                            cancel_result=task.cancel_result, result_summary=task_view(task).result_summary,
                            result_disputed=task.result_disputed)
@@ -956,13 +1037,13 @@ class TaskService:
     async def _can_view_task(self, context, tx, task):
         if task.customer_id != context.customer_id:
             return False
-        if await tx.task_visible(task.task_id):
+        if await tx.task_visible(task.conversation_id or task.task_id):
             return True
         return "approver" in context.roles and await self.policy.can_approve(context, task)
 
     async def get(self, context, task_id):
         async with self.store.unit_of_work(context) as tx:
-            task = await tx.load_task(task_id, actor_scope=False)
+            task = await tx.conversation_task(task_id, actor_scope=False)
             if not await self._can_view_task(context, tx, task):
                 raise NotFoundError(task_id)
             return await self.view_in_transaction(tx, task)
@@ -982,8 +1063,8 @@ class TaskService:
         if after < 0:
             raise PlanError("invalid event cursor")
         async with self.store.unit_of_work(context) as tx:
-            task = await tx.load_task(task_id, actor_scope=False)
+            task = await tx.conversation_task(task_id, actor_scope=False)
             if not await self._can_view_task(context, tx, task):
                 raise NotFoundError(task_id)
-            events = await tx.task_events(task_id, after, 100)
+            events = await tx.task_events(task.task_id, after, 100)
         return {"events": events, "next_seq": events[-1]["seq"] if events else after}

@@ -9,7 +9,8 @@ from robot_agent.domain.models import (
 
 
 class PlannerPort(Protocol):
-    async def plan(self, goal: str, answers: list[str], snapshot: ContextSnapshot) -> CandidatePlan: ...
+    async def call_llm(self, conversation_id: str, snapshot: ContextSnapshot, *,
+                       turn_id: str | None = None) -> CandidatePlan: ...
 
 
 class ConnectedRobots(Protocol):
@@ -30,6 +31,16 @@ class RobotPort(Protocol):
 
 class TaskTransaction(Protocol):
     async def task_visible(self, task_id: str) -> bool: ...
+
+    async def conversation_task(self, conversation_id: str, *, for_update: bool = False,
+                                actor_scope: bool = True) -> Task: ...
+
+    async def conversation_messages(self, conversation_id: str) -> list[Mapping[str, object]]: ...
+
+    async def append_message(self, customer_id: str, conversation_id: str, turn_id: str,
+                             role: str, message_kind: str, content: str, **kwargs) -> str: ...
+
+    async def start_turn(self, task: Task, text: str, *, message_id: str | None = None) -> Task: ...
 
     async def task_allocation_binding(self, task: Task) -> str | None: ...
 

@@ -98,6 +98,33 @@ class CancelInput(BaseModel):
     expected_version: int
 
 
+class MessageInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    text: str
+
+
+@router.post("/api/robot-agent/tasks/{task_id}/messages", status_code=202)
+async def task_message(task_id: str, body: MessageInput, request: Request):
+    from .resources import web_context
+    context = await web_context(request)
+    try:
+        value = request.app.state.inputs.text(
+            request_id=request.headers.get("idempotency-key", ""), text=body.text)
+        view = await request.app.state.service.message(
+            context, task_id, value, request.headers.get("idempotency-key", ""))
+    except PermissionError:
+        raise HTTPException(401, "UNAUTHENTICATED") from None
+    except NotFoundError:
+        raise HTTPException(404, "NOT_FOUND") from None
+    except ConflictError as exc:
+        raise HTTPException(409, str(exc)) from None
+    except PlanError as exc:
+        raise HTTPException(422, str(exc)) from None
+    except DependencyUnavailable as exc:
+        raise HTTPException(503, str(exc)) from None
+    return asdict(view)
+
+
 @router.post("/api/robot-agent/tasks/{task_id}/cancel")
 async def cancel_task(task_id: str, body: CancelInput, request: Request):
     auth = request.headers.get("authorization", "")

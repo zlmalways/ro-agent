@@ -94,6 +94,20 @@ class PostgresStore:
         logging.getLogger(__name__).error("storage access failed: type=%s sqlstate=%s",
                                          type(exc).__name__, getattr(exc, "sqlstate", ""))
 
+    async def conversation_messages(self, customer_id, conversation_id):
+        """Read the durable chat history for one customer conversation."""
+        async with self.pool.acquire() as connection:
+            rows = await connection.fetch("""
+                SELECT message_id, turn_id, seq, role, message_kind, content, created_at
+                FROM ra_task_messages
+                WHERE customer_id=$1 AND task_id=$2
+                ORDER BY seq
+            """, customer_id, conversation_id)
+        return [{"message_id": row["message_id"], "turn_id": row["turn_id"],
+                 "seq": row["seq"], "role": row["role"],
+                 "message_kind": row["message_kind"], "content": row["content"],
+                 "created_at": row["created_at"].isoformat()} for row in rows]
+
     async def migrate(self):
         migrations = Path(__file__).resolve().parents[3] / "db/migrations"
         if not migrations.is_dir():
@@ -143,20 +157,147 @@ class TaskTransaction:
 
     async def task_visible(self, task_id):
         return await self.connection.fetchval(
-            "SELECT EXISTS(SELECT 1 FROM ra_tasks t WHERE " + _TASK_READ_SCOPE + " AND t.task_id=$4)",
+            "SELECT EXISTS(SELECT 1 FROM ra_tasks t WHERE " + _TASK_READ_SCOPE
+            + " AND (t.task_id=$4 OR t.conversation_id=$4))",
             self.context.customer_id, self.context.actor_kind, self.context.actor_id, task_id)
+
+    async def conversation_task(self, conversation_id, *, for_update=False, actor_scope=True):
+        """Load the newest execution turn behind a public conversation id."""
+        if self.read_only and for_update:
+            raise ValueError("read snapshots cannot lock a task")
+        if for_update:
+            if self.context is None:
+                await self.connection.execute(
+                    "SELECT 1 FROM ra_conversations WHERE conversation_id=$1 FOR UPDATE",
+                    conversation_id)
+            else:
+                await self.connection.execute(
+                    "SELECT 1 FROM ra_conversations WHERE customer_id=$1 AND conversation_id=$2 FOR UPDATE",
+                    self.context.customer_id, conversation_id)
+        values = [conversation_id]
+        scope = ""
+        if self.context is not None:
+            scope = " AND customer_id=$2"
+            values.append(self.context.customer_id)
+            if actor_scope:
+                scope += " AND actor_id=$3 AND actor_kind=$4"
+                values.extend([self.context.actor_id, self.context.actor_kind])
+        lock = "" if self.read_only else " FOR UPDATE" if for_update else " FOR SHARE"
+        row = await self.connection.fetchrow(
+            "SELECT task_id FROM ra_tasks WHERE conversation_id=$1" + scope
+            + " ORDER BY turn_seq DESC LIMIT 1" + lock, *values)
+        if row is None:
+            raise NotFoundError("object not found")
+        return await self.load_task(row["task_id"], for_update=for_update, actor_scope=actor_scope)
+
+    async def public_task(self, identifier, *, for_update=False, actor_scope=True):
+        """Resolve either a public conversation id or an internal turn id."""
+        if self.read_only and for_update:
+            raise ValueError("read snapshots cannot lock a task")
+        values = [identifier]
+        scope = ""
+        if self.context is not None:
+            scope = " AND customer_id=$2"
+            values.append(self.context.customer_id)
+            if actor_scope:
+                scope += " AND actor_id=$3 AND actor_kind=$4"
+                values.extend([self.context.actor_id, self.context.actor_kind])
+        lock = "" if self.read_only else " FOR UPDATE" if for_update else " FOR SHARE"
+        row = await self.connection.fetchrow(
+            "SELECT task_id FROM ra_tasks WHERE (task_id=$1 OR conversation_id=$1)" + scope
+            + " ORDER BY CASE WHEN task_id=$1 THEN 0 ELSE 1 END, turn_seq DESC LIMIT 1" + lock,
+            *values)
+        if row is None:
+            raise NotFoundError("object not found")
+        return await self.load_task(row["task_id"], for_update=for_update, actor_scope=actor_scope)
+
+    async def conversation_messages(self, conversation_id, customer_id=None):
+        if self.context is not None:
+            self._check_customer(self.context.customer_id)
+            customer_id = self.context.customer_id
+        elif customer_id is None:
+            customer_id = await self.connection.fetchval(
+                "SELECT customer_id FROM ra_conversations WHERE conversation_id=$1 LIMIT 1", conversation_id)
+            if customer_id is None:
+                return []
+        rows = await self.connection.fetch("""
+            SELECT message_id, turn_id, seq, role, message_kind, content, created_at
+            FROM ra_task_messages
+            WHERE customer_id=$1 AND task_id=$2
+            ORDER BY seq
+        """, customer_id, conversation_id)
+        return [{"message_id": row["message_id"], "turn_id": row["turn_id"],
+                 "seq": row["seq"], "role": row["role"],
+                 "message_kind": row["message_kind"], "content": row["content"],
+                 "created_at": row["created_at"].isoformat()} for row in rows]
+
+    async def create_conversation(self, customer_id, conversation_id, actor_kind, actor_id):
+        await self.connection.execute("""
+            INSERT INTO ra_conversations(customer_id,conversation_id,actor_kind,actor_id)
+            VALUES ($1,$2,$3,$4)
+            ON CONFLICT (customer_id,conversation_id) DO NOTHING
+        """, customer_id, conversation_id, actor_kind, actor_id)
+
+    async def append_message(self, customer_id, conversation_id, turn_id, role, message_kind, content,
+                             request_key="", message_id=None):
+        if not content or not content.strip():
+            raise ValueError("message content must not be empty")
+        message_id = message_id or str(uuid4())
+        await self.connection.execute("""
+            SELECT 1 FROM ra_conversations
+            WHERE customer_id=$1 AND conversation_id=$2
+            FOR UPDATE
+        """, customer_id, conversation_id)
+        seq = await self.connection.fetchval("""
+            SELECT coalesce(max(seq),0)+1 FROM ra_task_messages
+            WHERE customer_id=$1 AND task_id=$2
+        """, customer_id, conversation_id)
+        await self.connection.execute("""
+            INSERT INTO ra_task_messages(customer_id,task_id,message_id,turn_id,seq,role,message_kind,content,request_key)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+        """, customer_id, conversation_id, message_id, turn_id, seq, role, message_kind, content, request_key)
+        await self.connection.execute("""
+            UPDATE ra_conversations SET updated_at=clock_timestamp()
+            WHERE customer_id=$1 AND conversation_id=$2
+        """, customer_id, conversation_id)
+        return message_id
+
+    async def start_turn(self, task, text, *, message_id=None):
+        """Create a new execution row for a later message in the same chat."""
+        conversation_id = task.conversation_id or task.task_id
+        turn_seq = await self.connection.fetchval("""
+            SELECT coalesce(max(turn_seq),0)+1 FROM ra_tasks
+            WHERE customer_id=$1 AND conversation_id=$2
+        """, task.customer_id, conversation_id)
+        turn_id = str(uuid4())
+        next_task = Task(turn_id, task.customer_id, task.actor_kind, task.actor_id, text,
+                         state="RECEIVED", unit_id=str(uuid4()), conversation_id=conversation_id,
+                         turn_seq=turn_seq)
+        await self.insert_task(next_task)
+        await self.append_message(task.customer_id, conversation_id, turn_id, "user", "user_text", text,
+                                  message_id=message_id)
+        await self.connection.execute("""
+            UPDATE ra_conversations SET updated_at=clock_timestamp()
+            WHERE customer_id=$1 AND conversation_id=$2
+        """, task.customer_id, conversation_id)
+        return next_task
 
     async def owner_history(self, limit, before):
         # Count and page the same visible rows at one PostgreSQL read snapshot.
         result = await self.connection.fetchrow("""
-            WITH owned AS NOT MATERIALIZED (
-                SELECT t.task_id, t.goal_text, t.state, t.reason_code, t.version, t.created_at, t.updated_at, t.queue_seq,
+            WITH latest AS NOT MATERIALIZED (
+                SELECT DISTINCT ON (t.customer_id, t.conversation_id) t.*
+                FROM ra_tasks t
+                WHERE """ + _TASK_READ_SCOPE + """
+                ORDER BY t.customer_id, t.conversation_id, t.turn_seq DESC
+            ), owned AS NOT MATERIALIZED (
+                SELECT t.task_id AS turn_id, t.conversation_id AS task_id,
+                       t.goal_text, t.state, t.reason_code, t.version, t.created_at, t.updated_at, t.queue_seq,
                        p.snapshot->>'robot_binding_id' AS plan_robot_binding_id,
                        g.binding_id AS allocation_robot_binding_id
-                FROM ra_tasks t LEFT JOIN ra_plans p ON p.customer_id=t.customer_id
+                FROM latest t LEFT JOIN ra_plans p ON p.customer_id=t.customer_id
                     AND p.task_id=t.task_id AND p.plan_id=t.active_plan_id
                 LEFT JOIN ra_execution_guard g ON g.customer_id=t.customer_id AND g.task_id=t.task_id AND g.deployment_id=$6
-                WHERE """ + _TASK_READ_SCOPE + """
             ), page AS (
                 SELECT * FROM owned WHERE $4::bigint IS NULL OR queue_seq < $4
                 ORDER BY queue_seq DESC LIMIT $5
@@ -171,7 +312,14 @@ class TaskTransaction:
     async def home_task_rows(self):
         # Active visible rows are independent of the history cursor.
         return await self.connection.fetch("""
-            SELECT t.task_id, t.goal_text, t.state, t.reason_code, t.version, t.queue_seq, t.created_at,
+            WITH latest AS NOT MATERIALIZED (
+                SELECT DISTINCT ON (t.customer_id, t.conversation_id) t.*
+                FROM ra_tasks t
+                WHERE """ + _TASK_READ_SCOPE + """
+                ORDER BY t.customer_id, t.conversation_id, t.turn_seq DESC
+            )
+            SELECT t.task_id AS turn_id, t.conversation_id AS task_id, t.goal_text, t.state, t.reason_code,
+                   t.version, t.queue_seq, t.created_at,
                    t.clarification, t.active_plan_id AS plan_id, t.completed,
                    p.snapshot->>'robot_binding_id' AS binding_id,
                    p.snapshot->'capability_labels' AS labels, p.steps,
@@ -180,10 +328,9 @@ class TaskTransaction:
                               ORDER BY c.created_at, c.command_id)
                     FROM ra_commands c WHERE c.customer_id=t.customer_id AND c.task_id=t.task_id
                     AND c.plan_id=t.active_plan_id) AS commands
-            FROM ra_tasks t LEFT JOIN ra_plans p ON p.customer_id=t.customer_id
+            FROM latest t LEFT JOIN ra_plans p ON p.customer_id=t.customer_id
                 AND p.task_id=t.task_id AND p.plan_id=t.active_plan_id
-            WHERE """ + _TASK_READ_SCOPE + """
-              AND (t.state IN ('NEEDS_CLARIFICATION','WAITING_APPROVAL','RUNNING',
+            WHERE (t.state IN ('NEEDS_CLARIFICATION','WAITING_APPROVAL','RUNNING',
                                'CANCEL_REQUESTED','READY','QUEUED','BLOCKED','FAILED')
                    OR t.error IS NOT NULL)
             ORDER BY t.queue_seq""", self.context.customer_id, self.context.actor_kind, self.context.actor_id)
@@ -232,9 +379,13 @@ class TaskTransaction:
 
     async def insert_task(self, task):
         self._check_customer(task.customer_id, task.actor_id, task.actor_kind)
+        conversation_id = task.conversation_id or task.task_id
+        turn_seq = task.turn_seq or 1
+        await self.create_conversation(task.customer_id, conversation_id, task.actor_kind, task.actor_id)
         await self.connection.execute("""INSERT INTO ra_tasks
-            (customer_id,task_id,actor_kind,actor_id,goal_text,state,reason_code,version,unit_id,error,advancement_stopped,cancel_result)
-            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb,$11,$12::jsonb)""", task.customer_id, task.task_id, task.actor_kind,
+            (customer_id,task_id,conversation_id,turn_seq,actor_kind,actor_id,goal_text,state,reason_code,version,unit_id,error,advancement_stopped,cancel_result)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12::jsonb,$13,$14::jsonb)""", task.customer_id, task.task_id,
+                                      conversation_id, turn_seq, task.actor_kind,
                                       task.actor_id, task.goal_text, task.state, task.reason_code, task.version, task.unit_id,
                                       _json(task.error) if task.error else None, task.advancement_stopped,
                                       _json(task.cancel_result) if task.cancel_result else None)
@@ -263,8 +414,12 @@ class TaskTransaction:
             steps = tuple(PlanStep(item["step_id"], item["action"], item["args"], tuple(item["depends_on"]),
                                    tuple(item["source_refs"])) for item in json.loads(record["steps"]))
             plan = Plan(record["plan_id"], record["revision"], steps, snapshot.snapshot_id)
-        records = await self.connection.fetch("SELECT * FROM ra_commands WHERE customer_id=$1 AND task_id=$2"
-                                               " ORDER BY created_at,command_id", row["customer_id"], task_id)
+        if row["active_plan_id"]:
+            records = await self.connection.fetch("SELECT * FROM ra_commands WHERE customer_id=$1 AND task_id=$2 AND plan_id=$3"
+                                                   " ORDER BY created_at,command_id", row["customer_id"], task_id,
+                                                   row["active_plan_id"])
+        else:
+            records = ()
         commands = tuple(Command(item["command_id"], item["task_id"], item["customer_id"], item["unit_id"],
                                  item["plan_id"], item["step_id"], item["binding_id"], item["wire_skill"],
                                  json.loads(item["wire_args"]), item["dispatch_generation"], item["dispatch_state"],
@@ -275,7 +430,8 @@ class TaskTransaction:
                     tuple(row["completed"]), row["clarification"], row["result_disputed"], row["clarification_id"], tuple(row["answers"]),
                     row["cancel_requested"], row["resume_phase"],
                     self._task_error(row), row["advancement_stopped"],
-                    json.loads(row["cancel_result"]) if row["cancel_result"] else None)
+                    json.loads(row["cancel_result"]) if row["cancel_result"] else None,
+                    row["conversation_id"], row["turn_seq"])
 
     @staticmethod
     def _task_error(row):

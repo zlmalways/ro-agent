@@ -203,7 +203,7 @@ function conversation(open, updateRoute = true) {
   $('conversation').hidden = !open;
   $('dock').hidden = open;
   $('dock').setAttribute('aria-expanded', String(open));
-  if (open)(canContinueTask(currentTask) ? $('goal') : currentTask ? $('new-task') :
+  if (open)(canSendMessage(currentTask) ? $('goal') : currentTask ? $('new-task') :
     submission?.ticket === selection ? $('cancel') : $('goal')).focus();
 }
 
@@ -272,9 +272,13 @@ function canContinueTask(task) {
   return endedStates.has(task.state) || task.advancement_stopped === true;
 }
 
+function canSendMessage(task) {
+  return !task || task.state === 'NEEDS_CLARIFICATION' || canContinueTask(task);
+}
+
 function updateControls() {
   const visibleSubmission = submission?.ticket === selection;
-  const mayCompose = currentTask ? canContinueTask(currentTask) : !visibleSubmission;
+  const mayCompose = currentTask ? canSendMessage(currentTask) : !visibleSubmission;
   $('submit-form').hidden = !mayCompose;
   // Keep follow-up changes limited to text; existing audio entry remains for a blank chat.
   $('voice-input').hidden = Boolean(currentTask || visibleSubmission);
@@ -326,7 +330,9 @@ function renderPending() {
   currentTask = null;
   $('chat-empty').hidden = true;
   $('task-detail').hidden = $('active-composer').hidden = false;
-  $('submit-form').hidden = $('voice-input').hidden = true;
+  $('submit-form').hidden = true;
+  $('voice-input').hidden = true;
+  $('task-goal').parentElement.hidden = false;
   $('task-goal').textContent = submission.goal;
   $('sent-status').textContent = submission.unconfirmed ? '提交结果未确认' : '正在发送';
   $('status').classList.remove('error-badge');
@@ -387,8 +393,8 @@ function renderHistory() {
 function rememberTask(view, submittedHere) {
   // A detail can belong to a different user whose plan this user may approve.
   const previous = rows.find(row => row.task_id === view.task_id);
-  if (previous && previous.version > view.version) return;
-  if (previous && previous.version === view.version) {
+  if (previous && previous.turn_id === view.turn_id && previous.version > view.version) return;
+  if (previous && previous.turn_id === view.turn_id && previous.version === view.version) {
     Object.assign(previous, view);
     renderHistory();
     return;
@@ -728,8 +734,25 @@ function taskReason(view) {
   }[view.state] || '');
 }
 
+function renderMessages(view) {
+  const messages = view.messages || [];
+  $('conversation-history').replaceChildren(...messages.map(message => {
+    if (message.role === 'assistant') {
+      const item = node('div', '', 'conversation-message assistant-message');
+      const content = node('div', '', 'assistant-content');
+      content.append(node('div', message.content || ''), node('small', '机器人'));
+      item.append(node('span', '✦', 'assistant-mark'), content);
+      return item;
+    }
+    const item = node('div', '', 'conversation-message user-message');
+    item.append(node('div', message.content || ''), node('small', '用户'));
+    return item;
+  }));
+}
+
 function renderConversation(view) {
-  if (currentTask?.task_id === view.task_id && view.version < currentTask.version) return;
+  if (currentTask?.task_id === view.task_id && currentTask.turn_seq === view.turn_seq &&
+      view.version < currentTask.version) return;
   if (endedStates.has(view.state) || view.state === 'CANCEL_REQUESTED') {
     const stopRequest = stopRequests.get(view.task_id);
     if (stopRequest) { stopRequest.resolved = true; delete stopRequest.error; }
@@ -741,11 +764,13 @@ function renderConversation(view) {
     return;
   }
   currentTask = view;
+  renderMessages(view);
   $('chat-empty').hidden = true;
   $('active-composer').hidden = false;
   $('task-reference').hidden = false;
   $('sent-status').textContent = '已提交';
   $('task-detail').hidden = false;
+  $('task-goal').parentElement.hidden = true;
   $('submit-form').hidden = $('voice-input').hidden = true;
   $('task-goal').textContent = view.goal_text || '';
   $('status').textContent = taskState(view);
@@ -759,8 +784,8 @@ function renderConversation(view) {
   const cancelMessage = view.cancel_result ? cancellationMessage(view) : stopRequests.get(view.task_id)?.error;
   $('cancel-result').hidden = !cancelMessage;
   $('cancel-result').textContent = cancelMessage ? '停止请求：' + cancelMessage : '';
-  $('question').textContent = error ? '' : view.clarification || '';
-  $('answer-form').hidden = Boolean(error) || view.state !== 'NEEDS_CLARIFICATION';
+  $('question').textContent = '';
+  $('answer-form').hidden = true;
   $('decisions').hidden = Boolean(error) || view.state !== 'WAITING_APPROVAL';
   const results = view.result_summary || [];
   $('execution-detail').hidden = !(view.plan_steps?.length || results.length);
@@ -874,13 +899,11 @@ async function write(path, payload, audioFile, fromBoard = false) {
     return;
   }
   const isSubmission = path === '/tasks' || path === '/tasks/audio';
-  // A follow-up is a new task, never a retry or amendment of the ended task.
-  if (isSubmission && currentTask && !canContinueTask(currentTask)) return;
-  if (isSubmission && !currentTask && submission?.ticket === selection) return;
   if (isSubmission && currentTask) {
-    archiveCurrentTask();
-    pendingWrite = null;
+    if (!canSendMessage(currentTask) || audioFile) return;
+    path = '/tasks/' + encodeURIComponent(currentTask.task_id) + '/messages';
   }
+  if (isSubmission && !currentTask && submission?.ticket === selection) return;
   const operation = requestAction(path, payload);
   if (operation && (!operation.key || actionAttempts.has(operation.key))) {
     updateControls();
@@ -1064,7 +1087,7 @@ $('lookup-form').onsubmit = event => {
 };
 $('submit-form').onsubmit = event => {
   event.preventDefault();
-  if ($('goal').value.trim()) write('/tasks', {
+  if ($('goal').value.trim()) write(currentTask ? '/tasks/' + encodeURIComponent(currentTask.task_id) + '/messages' : '/tasks', {
     text: $('goal').value.trim()
   });
 };
@@ -1151,7 +1174,7 @@ setInterval(async () => {
   try {
     const view = await api('/tasks/' + encodeURIComponent(id));
     if (ticket !== selection) return;
-    const changed = view.version !== currentTask.version;
+    const changed = view.turn_id !== currentTask.turn_id || view.version !== currentTask.version;
     renderConversation(view);
     if (changed) {
       board.observe(view, rows.some(row => row.task_id === view.task_id));

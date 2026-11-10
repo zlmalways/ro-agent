@@ -242,6 +242,10 @@ class Task:
     error: Mapping[str, Any] | None = None
     advancement_stopped: bool = False
     cancel_result: Mapping[str, Any] | None = None
+    # task_id is the durable execution-turn id inside the store.  The public
+    # conversation id is stable across all turns in one chat session.
+    conversation_id: str = ""
+    turn_seq: int = 0
 
 
 @dataclass(frozen=True)
@@ -270,6 +274,9 @@ class TaskView:
     error: Mapping[str, Any] | None = None
     advancement_stopped: bool = False
     cancel_result: Mapping[str, Any] | None = None
+    turn_id: str = ""
+    turn_seq: int = 0
+    messages: tuple[dict, ...] = ()
 
 
 @dataclass(frozen=True)
