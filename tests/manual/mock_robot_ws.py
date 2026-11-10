@@ -16,6 +16,36 @@ from websockets.exceptions import ConnectionClosed, WebSocketException
 
 log = logging.getLogger("mock_robot")
 DEFAULT_REPORT_INTERVAL = 10.0
+DEFAULT_MAP = "701_map_1015"
+DEFAULT_WAYPOINTS = ("研发桌一", "研发桌二", "门口", "冰箱")
+DEFAULT_SKILLS = ("capture_image", "list_waypoints", "move_to", "save_waypoint", "vla_skill", "wait")
+DEFAULT_VLA_SKILL_IDS = (
+    "open_fridge_door",
+    "pick_canned_pepsi",
+    "return_canned_pepsi_to_fridge",
+    "pick_canned_mirinda",
+    "return_canned_mirinda_to_fridge",
+    "pick_canned_coconut_juice",
+    "return_canned_coconut_juice_to_fridge",
+    "heat_popcorn_open_door_first",
+    "heat_popcorn_pick_popcorn_first",
+    "pick_heated_popcorn",
+    "add_ice_and_place_cup_on_table",
+    "add_ice_and_hold_cup_left",
+    "place_drink_on_table",
+    "place_drink_on_table_left",
+    "sort_fruit_and_bread",
+    "pick_tissue",
+    "put_pen_in_holder",
+    "put_pen_in_bag",
+    "pack_network_switch_in_box",
+    "plug_fan_with_right_hand_support",
+    "connect_leads_and_measure_breadboard_resistance",
+    "pick_printed_paper",
+    "open_door",
+    "push_half_open_door",
+)
+DEFAULT_CAPABILITIES = ("locomotion", "manipulation", "sensing")
 
 
 def connection(url, token, robot_id):
@@ -46,22 +76,23 @@ class Simulator:
         self.map_name = map_name
         self.waypoints = waypoints
         self.skill_ids = skill_ids
+        self.capabilities = list(DEFAULT_CAPABILITIES)
         self.duration = duration
         self.active = None
         self.finish_at = 0.0
         self.replies = {}
 
     def hello(self):
-        skills = ["move_to", "vla_skill"] if self.skill_ids else ["move_to"]
         return {"type": "hello", "robot_id": self.robot_id, "executor": "simulator",
-                "busy_cmd_id": self.active or "", "skills": skills}
+                "busy_cmd_id": self.active or "", "skills": list(DEFAULT_SKILLS)}
 
     def readiness(self):
         return {"type": "readiness", "executor": "simulator", "busy": self.active is not None,
                 "map": self.map_name, "waypoints": len(self.waypoints), "waypoint_names": self.waypoints,
                 "preload": "loaded", "nav_server_ready": True, "skill_server_ready": bool(self.skill_ids),
                 "brain_server_ready": bool(self.skill_ids), "brain_engine": "ready" if self.skill_ids else "off",
-                "brain_skills": [{"skill_id": key} for key in self.skill_ids]}
+                "brain_skills": [{"skill_id": key} for key in self.skill_ids],
+                "capabilities": list(self.capabilities)}
 
     def finish(self, state, detail):
         reply = status(self.active, state, detail)
@@ -413,7 +444,7 @@ def main():
     sub = parser.add_subparsers(dest="mode", required=True)
     serve = sub.add_parser("serve")
     serve.add_argument("--robot-id", default="mock-fridge-01")
-    serve.add_argument("--map", default="模拟办公区")
+    serve.add_argument("--map", default=DEFAULT_MAP)
     serve.add_argument("--waypoint", action="append")
     serve.add_argument("--skill-id", action="append", default=[])
     serve.add_argument("--duration", type=float, default=1.0)
@@ -441,7 +472,8 @@ def main():
         if args.mode == "serve":
             if not 0 < args.duration <= 3600:
                 parser.error("--duration must be between 0 and 3600 seconds")
-            robot = Simulator(args.robot_id, args.map, args.waypoint or ["前台", "充电点"], args.skill_id, args.duration)
+            robot = Simulator(args.robot_id, args.map, args.waypoint or list(DEFAULT_WAYPOINTS),
+                              args.skill_id or list(DEFAULT_VLA_SKILL_IDS), args.duration)
             if not 0 < args.report_interval < float("inf"):
                 parser.error("--report-interval must be positive and finite")
             asyncio.run(serve_robot(args.url, token, robot, interval=args.report_interval))
