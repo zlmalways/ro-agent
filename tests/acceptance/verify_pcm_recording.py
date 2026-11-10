@@ -147,9 +147,11 @@ async def run_case(name, fixture, output_root, base_config, runtime):
     runtime["application_config"] = str(APP_CONFIG)
     RUNTIME_CONFIG.write_text(json.dumps(runtime, ensure_ascii=False, indent=2), encoding="utf-8")
     before = set(RECORDINGS.rglob("*.wav")) if RECORDINGS.exists() else set()
-    process, log, log_path = launch("wav-" + name, RUNTIME_CONFIG)
+    process, log, log_path = launch("wav-" + name + "-" + output_root.name, RUNTIME_CONFIG)
     command = None
-    result = {"case": name, "log": str(log_path)}
+    result = {"case": name, "log": str(log_path), "status": "running",
+              "freshness_seconds": config["limits"]["freshness_seconds"],
+              "wav_save_dir": config["voice_pcm"].get("wav_save_dir")}
     try:
         await wait_healthy(process, log_path)
         robot = Simulator("mock-fridge-01", "模拟办公区", ["前台", "充电点"], [], 0.5)
@@ -175,6 +177,10 @@ async def run_case(name, fixture, output_root, base_config, runtime):
             result["upload"] = upload
             task_id = upload["tasks"][0]["task_id"]
             segment_id = upload["segments"][0]["segment_id"]
+            if name == "write-failure":
+                log_text = log_path.read_text(encoding="utf-8", errors="replace")
+                result["save_error_logged"] = "PCM WAV save failed" in log_text and segment_id in log_text
+                require(result["save_error_logged"], "Save error was not logged")
             result["task"] = await task_result(client, task_id)
             result["database"] = await evidence(task_id, segment_id)
             after = set(RECORDINGS.rglob("*.wav")) if RECORDINGS.exists() else set()
@@ -189,12 +195,12 @@ async def run_case(name, fixture, output_root, base_config, runtime):
                                        "sha256": sha256(saved.read_bytes()).hexdigest()}
             else:
                 require(not new_files, "A platform recording was unexpectedly written")
-            if name == "write-failure":
-                log_text = log_path.read_text(encoding="utf-8", errors="replace")
-                require("PCM WAV save failed" in log_text and segment_id in log_text, "Save error was not logged")
             result["status"] = "passed"
             print(json.dumps(result, ensure_ascii=False, default=str), flush=True)
             return result
+    except Exception as exc:
+        result.update(status="failed", error_type=type(exc).__name__, error=str(exc))
+        raise
     finally:
         if command is not None:
             command.cancel()
@@ -205,6 +211,8 @@ async def run_case(name, fixture, output_root, base_config, runtime):
         finally:
             log.close()
             blocker.unlink(missing_ok=True)
+            (output_root / (name + "-verification.json")).write_text(
+                json.dumps(result, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
 
 
 async def main(args):
@@ -214,6 +222,9 @@ async def main(args):
             "This verification only targets the approved test ports")
     require(not listening(18764), "18764 is occupied; stop the identified test instance first")
     require(not APP_CONFIG.exists() and not RUNTIME_CONFIG.exists(), "Temporary configuration already exists")
+    report_path = args.report or REPORT
+    require(report_path.resolve().is_relative_to(TEST.resolve()), "Verification report must stay in test-db")
+    require(not report_path.exists(), "Report already exists; choose a new --report to preserve earlier evidence")
     os.environ.update(load_provider_environment(args.provider_env_file, args.asr_credential))
     output_root = TEST / ("wav-e2e-" + datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ"))
     output_root.mkdir()
@@ -223,7 +234,8 @@ async def main(args):
                   "src/robot_agent/application/pcm_segment_service.py", "src/robot_agent/deployment.py")},
               "input_wav": str(args.wav), "input_sha256": sha256(args.wav.read_bytes()).hexdigest(), "cases": []}
     try:
-        for name in ("save", "without-config", "write-failure"):
+        cases = (args.case,) if args.case else ("save", "without-config", "write-failure")
+        for name in cases:
             report["active_case"] = name
             report["cases"].append(await run_case(name, args.wav, output_root, base_config, runtime))
         report["status"] = "passed"
@@ -231,7 +243,7 @@ async def main(args):
         report.update(status="failed", error_type=type(exc).__name__, error=str(exc))
         raise
     finally:
-        REPORT.write_text(json.dumps(report, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+        report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
         APP_CONFIG.unlink(missing_ok=True)
         RUNTIME_CONFIG.unlink(missing_ok=True)
 
@@ -242,6 +254,9 @@ if __name__ == "__main__":
     parser.add_argument("--provider-env-file", type=Path, required=True)
     parser.add_argument("--asr-credential", required=True)
     parser.add_argument("--wav", type=Path, required=True)
+    parser.add_argument("--case", choices=("save", "without-config", "write-failure"),
+                        help="run one case instead of the full sequence")
+    parser.add_argument("--report", type=Path, help="write to a new report in test-db; never overwrite old evidence")
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     asyncio.run(main(args))
