@@ -1,4 +1,5 @@
 import json
+from uuid import uuid4
 
 import httpx
 
@@ -55,11 +56,13 @@ def _responses_text(body):
 
 
 class OpenAICompatiblePlanner:
-    def __init__(self, config, *, client=None, max_response_bytes=65536, history_loader=None):
+    def __init__(self, config, *, client=None, max_response_bytes=65536, history_loader=None,
+                 audit_store=None):
         self.config = config
         self.client = client
         self.max_response_bytes = max_response_bytes
         self.history_loader = history_loader
+        self.audit_store = audit_store
 
     async def call_llm(self, conversation_id, snapshot, *, turn_id=None):
         if self.history_loader is None:
@@ -114,6 +117,35 @@ class OpenAICompatiblePlanner:
 
         url = self.config.base_url.rstrip("/") + path
         headers = {"Authorization": "Bearer " + self.config.api_key}
+        audit_endpoint = url.replace(self.config.api_key, "[redacted]") if self.config.api_key else url
+        llm_call_id = None
+        if self.audit_store is not None:
+            if not turn_id:
+                raise DependencyUnavailable("PLANNER_AUDIT_UNAVAILABLE")
+            llm_call_id = str(uuid4())
+            await self.audit_store.start_llm_call(
+                customer_id=snapshot.customer_id,
+                llm_call_id=llm_call_id,
+                turn_id=turn_id,
+                provider=self.config.name,
+                model=self.config.model,
+                endpoint=audit_endpoint,
+                request_json=request,
+            )
+
+        async def finish_audit(*, status, response_json=None, response_text=None,
+                               http_status=None, provider_request_id=None):
+            if llm_call_id is not None:
+                await self.audit_store.finish_llm_call(
+                    snapshot.customer_id,
+                    llm_call_id,
+                    status=status,
+                    response_json=response_json,
+                    response_text=response_text,
+                    http_status=http_status,
+                    provider_request_id=provider_request_id,
+                )
+
         try:
             if self.client is None:
                 async with httpx.AsyncClient(timeout=self.config.timeout_seconds, trust_env=not relay) as client:
@@ -121,19 +153,47 @@ class OpenAICompatiblePlanner:
             else:
                 response = await self.client.post(url, headers=headers, json=request, follow_redirects=False)
         except httpx.HTTPError as exc:
+            detail = f"{type(exc).__name__}: {exc}"
+            if self.config.api_key:
+                detail = detail.replace(self.config.api_key, "[redacted]")
+            await finish_audit(status="FAILED", response_text=detail)
             raise DependencyUnavailable("PLANNER_UNAVAILABLE") from exc
-        if response.status_code >= 500:
-            raise DependencyUnavailable("PLANNER_UNAVAILABLE")
-        if response.status_code >= 300:
-            raise PlanError("PLANNER_PROVIDER_REJECTED")
-        if len(response.content) > self.max_response_bytes:
-            raise PlanError("PLANNER_RESPONSE_TOO_LARGE")
+
+        response_json = None
+        response_text = None
         try:
-            body = response.json()
-            content = _responses_text(body) if relay else body["choices"][0]["message"]["content"]
-            return CandidatePlan.from_dict(json.loads(content))
-        except (KeyError, IndexError, AttributeError, TypeError, ValueError) as exc:
-            raise PlanError("PLANNER_INVALID_OUTPUT") from exc
+            response_json = response.json()
+        except (TypeError, ValueError):
+            response_text = response.text
+        # A JSON null response still needs to be distinguishable from no response.
+        if response_json is None and response_text is None:
+            response_text = response.text
+        provider_request_id = response.headers.get("x-request-id") or response.headers.get("request-id")
+        if not provider_request_id and isinstance(response_json, dict):
+            body_id = response_json.get("id")
+            if isinstance(body_id, str):
+                provider_request_id = body_id
+        result = dict(response_json=response_json, response_text=response_text,
+                      http_status=response.status_code, provider_request_id=provider_request_id)
+
+        try:
+            if response.status_code >= 500:
+                raise DependencyUnavailable("PLANNER_UNAVAILABLE")
+            if response.status_code >= 300:
+                raise PlanError("PLANNER_PROVIDER_REJECTED")
+            if len(response.content) > self.max_response_bytes:
+                raise PlanError("PLANNER_RESPONSE_TOO_LARGE")
+            try:
+                content = (_responses_text(response_json) if relay
+                           else response_json["choices"][0]["message"]["content"])
+                candidate = CandidatePlan.from_dict(json.loads(content))
+            except (KeyError, IndexError, AttributeError, TypeError, ValueError) as exc:
+                raise PlanError("PLANNER_INVALID_OUTPUT") from exc
+        except (DependencyUnavailable, PlanError):
+            await finish_audit(status="FAILED", **result)
+            raise
+        await finish_audit(status="SUCCEEDED", **result)
+        return candidate
 
     async def plan(self, goal, answers, snapshot):
         """Legacy adapter kept for old callers; new task flow uses call_llm."""

@@ -161,7 +161,8 @@ def build_app(configuration, *, environment=None):
             planner = OpenAICompatiblePlanner(
                 load_provider_config(environment) if configuration.get("allow_external_calls") is True else None,
                 max_response_bytes=limits["provider_response_bytes"],
-                history_loader=store.conversation_messages)
+                history_loader=store.conversation_messages,
+                audit_store=store)
             asr = build_asr(configuration, environment)
             owner = RuntimeOwnership(dsn=dsn, deployment_id=deployment["id"], host_id=deployment["host_id"],
                                      lock_path=deployment["lock_path"], advisory_key=deployment["advisory_key"],

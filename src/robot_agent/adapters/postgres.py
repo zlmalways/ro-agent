@@ -108,6 +108,24 @@ class PostgresStore:
                  "message_kind": row["message_kind"], "content": row["content"],
                  "created_at": row["created_at"].isoformat()} for row in rows]
 
+    async def start_llm_call(self, *, customer_id, llm_call_id, turn_id,
+                             provider, model, endpoint, request_json):
+        """Persist the exact provider request before any network I/O."""
+        async with self.system_unit_of_work() as tx:
+            await tx.insert_llm_call(customer_id, llm_call_id, turn_id,
+                                     provider, model, endpoint, request_json)
+        return llm_call_id
+
+    async def finish_llm_call(self, customer_id, llm_call_id, *, status,
+                              response_json=None, response_text=None, http_status=None,
+                              provider_request_id=None):
+        """Persist the complete provider result and close the audit row."""
+        async with self.system_unit_of_work() as tx:
+            await tx.finish_llm_call(customer_id, llm_call_id, status=status,
+                                     response_json=response_json, response_text=response_text,
+                                     http_status=http_status,
+                                     provider_request_id=provider_request_id)
+
     async def migrate(self):
         migrations = Path(__file__).resolve().parents[3] / "db/migrations"
         if not migrations.is_dir():
@@ -230,6 +248,42 @@ class TaskTransaction:
                  "seq": row["seq"], "role": row["role"],
                  "message_kind": row["message_kind"], "content": row["content"],
                  "created_at": row["created_at"].isoformat()} for row in rows]
+
+    async def insert_llm_call(self, customer_id, llm_call_id, turn_id,
+                              provider, model, endpoint, request_json):
+        self._check_customer(customer_id)
+        # system_unit_of_work serializes this allocation. A clarification may
+        # call the model again within the same execution turn.
+        attempt_no = await self.connection.fetchval("""
+            SELECT coalesce(max(attempt_no),0)+1 FROM ra_llm_calls
+            WHERE customer_id=$1 AND turn_id=$2
+        """, customer_id, turn_id)
+        await self.connection.execute("""
+            INSERT INTO ra_llm_calls
+                (customer_id, llm_call_id, turn_id, attempt_no, provider, model,
+                 endpoint, request_json, status)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,'STARTED')
+        """, customer_id, llm_call_id, turn_id, attempt_no, provider, model,
+            endpoint, _json(request_json))
+
+    async def finish_llm_call(self, customer_id, llm_call_id, *, status,
+                              response_json=None, response_text=None, http_status=None,
+                              provider_request_id=None):
+        self._check_customer(customer_id)
+        result = await self.connection.execute("""
+            UPDATE ra_llm_calls
+            SET response_json=$1::jsonb,
+                response_text=$2,
+                status=$3,
+                http_status=$4,
+                provider_request_id=$5,
+                finished_at=clock_timestamp()
+            WHERE customer_id=$6 AND llm_call_id=$7 AND status='STARTED'
+        """, _json(response_json) if response_json is not None else None,
+            response_text, status, http_status, provider_request_id,
+            customer_id, llm_call_id)
+        if result != "UPDATE 1":
+            raise ConflictError("llm call is missing or already finished")
 
     async def create_conversation(self, customer_id, conversation_id, actor_kind, actor_id):
         await self.connection.execute("""
