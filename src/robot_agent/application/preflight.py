@@ -28,7 +28,10 @@ class Preflight:
                                              for step in plan.steps)) if plan else candidate
         if not snapshot.robot_binding_id or not snapshot.skills:
             raise PreflightBlocked("CAPABILITY_UNKNOWN")
-        if snapshot.valid_until is not None and datetime.now(timezone.utc) >= snapshot.valid_until:
+        # Planning may take longer than the freshness window.  The snapshot is
+        # still used to ground the candidate, while dispatch/approval/write
+        # phases re-read the current snapshot and enforce its deadline.
+        if phase != "planning" and snapshot.valid_until is not None and datetime.now(timezone.utc) >= snapshot.valid_until:
             raise PreflightBlocked("RESOURCE_EXPIRED", source="resources", phase=phase)
         validated = validate_plan(value, snapshot, self.catalog)
         if plan and validated.steps != plan.steps:

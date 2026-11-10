@@ -87,3 +87,20 @@ async def test_explicit_plan_limit_rejects_long_candidate():
     assert result.state == "FAILED"
     await service.dispatch_next("test-deployment")
     assert robot.sent == []
+
+
+@pytest.mark.asyncio
+async def test_planning_preflight_is_marked_as_planning_phase():
+    service, _, _ = build_service()
+    phases = []
+    original = service.preflight.check
+
+    async def check(context, candidate, snapshot, phase="admission", approvals=()):
+        phases.append(phase)
+        return await original(context, candidate, snapshot, phase, approvals)
+
+    service.preflight.check = check
+    result = await submit_and_plan(service, CONTEXT, TaskInput("req", "web", "test", ""), "phase")
+
+    assert result.state == "READY"
+    assert phases == ["planning"]

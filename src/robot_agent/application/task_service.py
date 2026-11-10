@@ -302,7 +302,7 @@ class TaskService:
             elif candidate.outcome == "unsupported":
                 changed = replace(task, state="FAILED", reason_code="UNSUPPORTED")
             else:
-                check = await self.preflight.check(context, candidate, snapshot)
+                check = await self.preflight.check(context, candidate, snapshot, "planning")
                 state = {"allow": "READY", "deny": "FAILED", "require_confirmation": "WAITING_APPROVAL",
                          "unavailable": "BLOCKED"}[check.authorization]
                 changed = replace(task, state=state, reason_code="" if state == "READY" else "AUTHORIZATION_" + check.authorization.upper(),
