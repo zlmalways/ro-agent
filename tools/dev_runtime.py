@@ -59,6 +59,34 @@ def read_secret(value):
     return secret
 
 
+def read_llm_environment(application):
+    if application.get("allow_external_calls") is not True:
+        return {}
+    configuration = application.get("llm")
+    require(isinstance(configuration, dict), "已启用外部模型调用，但缺少本机 llm 配置。")
+    provider = configuration.get("provider", "")
+    require(provider in {"gpt", "deepseek", "relay"}, "llm.provider 必须是 gpt、deepseek 或 relay。")
+    credentials_file = Path(configuration.get("credentials_file", ""))
+    require(credentials_file.is_absolute() and credentials_file.is_file(),
+            "llm.credentials_file 不存在或不是绝对路径。")
+    credentials = read_json(credentials_file)
+    prefix = provider.upper()
+    environment = {"DEEPLEAP_LLM_PROVIDER": provider}
+    for suffix in ("BASE_URL", "API_KEY", "MODEL"):
+        name = f"{prefix}_{suffix}"
+        value = credentials.get(name, "")
+        require(isinstance(value, str) and value.strip(),
+                f"模型凭据文件缺少 {name}。")
+        environment[name] = value.strip()
+    timeout_name = f"{prefix}_TIMEOUT_S"
+    timeout = credentials.get(timeout_name, "")
+    if timeout not in (None, ""):
+        require(isinstance(timeout, (int, float, str)) and str(timeout).strip(),
+                f"模型凭据文件中的 {timeout_name} 无效。")
+        environment[timeout_name] = str(timeout).strip()
+    return environment
+
+
 def read_settings(config_path):
     config_path = project_path(str(config_path.resolve()), parent=TEST_ROOT)
     runtime = read_json(config_path)
@@ -88,9 +116,11 @@ def read_settings(config_path):
     require(references == set(runtime["credentials"]), "用户/机器人凭据引用与本机配置不一致。")
     require(all(name.startswith("RO_AGENT_TEST_") for name in references), "只允许独立测试凭据环境变量。")
     secrets = {name: read_secret(path) for name, path in runtime["credentials"].items()}
+    llm_environment = read_llm_environment(application)
     return {
         "runtime": runtime, "application": application, "application_file": application_file,
         "data": data, "log": log, "pg_ctl": pg_ctl, "secrets": secrets,
+        "llm_environment": llm_environment,
         "password": read_secret(database["password_file"]),
         "admin_password": read_secret(database["admin_password_file"]),
     }
@@ -192,6 +222,7 @@ async def run(settings):
         await prepare_database(settings)
         database = settings["runtime"]["postgresql"]
         os.environ.update(settings["secrets"])
+        os.environ.update(settings["llm_environment"])
         password = quote(settings["password"], safe="")
         os.environ["RO_AGENT_TEST_DATABASE_URL"] = (
             f"postgresql://{database['user']}:{password}@{database['host']}:{database['port']}/{database['database']}"
