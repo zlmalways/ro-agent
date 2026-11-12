@@ -88,7 +88,10 @@ async def home_tasks(request: Request):
 async def request_result(request_key: str, request: Request):
     from .resources import web_context
     context = await web_context(request)
-    view = await request.app.state.service.request_result(context, request_key)
+    try:
+        view = await request.app.state.service.request_result(context, request_key)
+    except NotFoundError:
+        raise HTTPException(404, "NOT_FOUND") from None
     return {"found": True, "task": asdict(view)} if view else {"found": False, "request_key": request_key}
 
 

@@ -91,17 +91,23 @@ class TaskService:
     async def interaction(self, context, task):
         controls = conversation_interaction(task)
         if context is not None:
-            owner = (task.customer_id, task.actor_kind, task.actor_id) == (
-                context.customer_id, context.actor_kind, context.actor_id)
-            controls["can_message"] &= owner
+            controller = await self.policy.can_control(context, task)
+            controls["can_message"] &= controller
             if any(controls[key] for key in ("can_pause", "can_stop", "can_stop_execution",
                                               "can_resume_execution", "can_end_execution")):
                 allowed = await self.policy.can_cancel(context, task)
                 for key in ("can_pause", "can_stop", "can_stop_execution", "can_resume_execution", "can_end_execution"):
-                    controls[key] &= allowed and owner
+                    controls[key] &= allowed and controller
             if controls["can_decide"]:
                 controls["can_decide"] = await self.policy.can_approve(context, task)
         return controls
+
+    async def require_conversation_control(self, tx, context, conversation_id):
+        conversation = await tx.get_conversation(conversation_id, actor_scope=False)
+        owner = TrustedContext(conversation["customer_id"], conversation["actor_kind"], conversation["actor_id"])
+        if not await self.policy.can_control(context, owner):
+            raise NotFoundError("object not found")
+        return owner
 
     @staticmethod
     def empty_conversation_view(conversation_id, *, can_message=True):
@@ -255,26 +261,23 @@ class TaskService:
                 if existing[0] != digest:
                     raise ConflictError("request key content conflict")
                 current = await tx.conversation_task(conversation_id)
-                if (current.customer_id, current.actor_kind, current.actor_id) != (
-                        context.customer_id, context.actor_kind, context.actor_id):
+                if not await self.policy.can_control(context, current):
                     raise NotFoundError("object not found")
                 return await self.view_in_transaction(tx, current, context=context)
             current = await tx.conversation_task(conversation_id, for_update=True, allow_empty=True)
-            conversation = await tx.get_conversation(conversation_id)
-            if (conversation["customer_id"], conversation["actor_kind"], conversation["actor_id"]) != (
-                    context.customer_id, context.actor_kind, context.actor_id):
-                raise NotFoundError("object not found")
+            owner = await self.require_conversation_control(tx, context, conversation_id)
             if not conversation_interaction(current)["can_message"]:
                 raise ConflictError("conversation has an active turn")
             if current is None:
-                first = Task(str(uuid4()), context.customer_id, context.actor_kind, context.actor_id,
+                first = Task(str(uuid4()), owner.customer_id, owner.actor_kind, owner.actor_id,
                              value.text, unit_id=str(uuid4()), conversation_id=conversation_id, turn_seq=1)
                 await tx.insert_task(first)
                 await tx.append_message(first.customer_id, conversation_id, first.task_id,
                                         "user", "user_text", value.text, request_key=request_key)
                 await tx.put_request(context.customer_id, context.actor_id, request_key, digest,
                                      first.task_id, "message")
-                await tx.append_event(first.task_id, TaskEvent("received", {"state": first.state}))
+                await tx.append_event(first.task_id, TaskEvent("received", {
+                    "state": first.state, "actor_kind": context.actor_kind, "actor_id": context.actor_id}))
                 target_id = first.task_id
             elif current.state == "NEEDS_CLARIFICATION":
                 changed = replace(current, state="RECEIVED", reason_code="", resume_phase="",
@@ -286,13 +289,15 @@ class TaskService:
                 await self._persist(tx, ChangeSet(changed))
                 await tx.put_request(context.customer_id, context.actor_id, request_key, digest,
                                      current.task_id, "message")
-                await tx.append_event(current.task_id, TaskEvent("message_received", {"state": changed.state}))
+                await tx.append_event(current.task_id, TaskEvent("message_received", {
+                    "state": changed.state, "actor_kind": context.actor_kind, "actor_id": context.actor_id}))
                 target_id = current.task_id
             else:
                 next_task = await tx.start_turn(current, value.text, message_id=None)
                 await tx.put_request(context.customer_id, context.actor_id, request_key, digest,
                                      next_task.task_id, "message")
-                await tx.append_event(next_task.task_id, TaskEvent("received", {"state": next_task.state}))
+                await tx.append_event(next_task.task_id, TaskEvent("received", {
+                    "state": next_task.state, "actor_kind": context.actor_kind, "actor_id": context.actor_id}))
                 target_id = next_task.task_id
         await self.schedule_pending(self.store.deployment_id, task_id=target_id, wait_for_plan=False)
         return await self.get(context, conversation_id)
@@ -549,8 +554,7 @@ class TaskService:
         existing = await tx.get_request(context.customer_id, context.actor_id, request_key, operation)
         task = (await tx.load_task(existing[1], for_update=True) if existing else
                 await tx.conversation_task(conversation_id, for_update=True))
-        if (task.customer_id, task.actor_kind, task.actor_id) != (
-                context.customer_id, context.actor_kind, context.actor_id):
+        if not await self.policy.can_control(context, task):
             raise NotFoundError("object not found")
         if existing:
             if existing[0] != digest:
@@ -596,7 +600,7 @@ class TaskService:
                                  task.task_id, "pause_execution")
             await tx.append_event(task.task_id, TaskEvent("execution_pause_requested", {
                 "step_id": changed.pause_step_id, "command_id": changed.pause_command_id,
-                "request_key": request_key, "actor_id": context.actor_id}))
+                "request_key": request_key, "actor_kind": context.actor_kind, "actor_id": context.actor_id}))
         if current is not None:
             try:
                 observation = (await self.robot.cancel(current) if getattr(self.store, "write_available", True)
@@ -676,7 +680,8 @@ class TaskService:
             await tx.put_request(context.customer_id, context.actor_id, request_key, digest,
                                  current.task_id, "resume_execution")
             await tx.append_event(current.task_id, TaskEvent("execution_resumed", {
-                "request_key": request_key, "actor_id": context.actor_id, "plan_id": plan_id,
+                "request_key": request_key, "actor_kind": context.actor_kind, "actor_id": context.actor_id,
+                "plan_id": plan_id,
                 "pause_command_id": current.pause_command_id, "skipped_step_id": skipped_now,
                 "next_step_id": remaining_steps(changed)[0].step_id if remaining_steps(changed) else None}))
             await tx.append_message(current.customer_id, conversation_id, current.task_id, "assistant", "assistant_text",
@@ -697,7 +702,7 @@ class TaskService:
         async with self.store.system_unit_of_work() as tx:
             existing = await tx.get_request(context.customer_id, context.actor_id, request_key, "cancel")
             task = await tx.conversation_task(task_id, for_update=True)
-            if task.customer_id != context.customer_id or task.actor_id != context.actor_id:
+            if not await self.policy.can_control(context, task):
                 raise NotFoundError("object not found")
             if existing:
                 if existing[0] != digest:
@@ -729,7 +734,8 @@ class TaskService:
                                   "occurred_at": datetime.now(timezone.utc).isoformat()})
             await self._persist(tx, ChangeSet(changed))
             await tx.put_request(context.customer_id, context.actor_id, request_key, digest, task.task_id, "cancel")
-            await tx.append_event(task.task_id, TaskEvent("cancel_requested", {"state": changed.state}))
+            await tx.append_event(task.task_id, TaskEvent("cancel_requested", {
+                "state": changed.state, "actor_kind": context.actor_kind, "actor_id": context.actor_id}))
             if not in_flight:
                 await self._release_unstarted(tx, changed)
         if in_flight:
@@ -763,13 +769,18 @@ class TaskService:
         if not answer.strip() or not request_key:
             raise PlanError("ANSWER_REQUIRED")
         digest = sha256(json.dumps([task_id, clarification_id, answer, expected_version]).encode()).hexdigest()
-        async with self.store.unit_of_work(context) as tx:
+        async with self.store.system_unit_of_work() as tx:
             existing = await tx.get_request(context.customer_id, context.actor_id, request_key, "answer")
             if existing:
                 if existing[0] != digest:
                     raise ConflictError("request key content conflict")
-                return await self.view_in_transaction(tx, await tx.load_task(existing[1]), context=context)
+                task = await tx.load_task(existing[1])
+                if not await self.policy.can_control(context, task):
+                    raise NotFoundError("object not found")
+                return await self.view_in_transaction(tx, task, context=context)
             task = await tx.conversation_task(task_id, for_update=True)
+            if not await self.policy.can_control(context, task):
+                raise NotFoundError("object not found")
             if (task.version != expected_version or task.state != "NEEDS_CLARIFICATION"
                     or not conversation_interaction(task)["can_message"] or task.clarification_id != clarification_id):
                 raise ConflictError("clarification version changed")
@@ -779,7 +790,8 @@ class TaskService:
                                     "user", "user_text", answer, request_key=request_key)
             await self._persist(tx, ChangeSet(changed))
             await tx.put_request(context.customer_id, context.actor_id, request_key, digest, task.task_id, "answer")
-            await tx.append_event(task.task_id, TaskEvent("clarification_answered", {"state": changed.state}))
+            await tx.append_event(task.task_id, TaskEvent("clarification_answered", {
+                "state": changed.state, "actor_kind": context.actor_kind, "actor_id": context.actor_id}))
         # A clarification is also durable input, not a request to wait for the model.
         await self.schedule_pending(self.store.deployment_id, task_id=changed.task_id, wait_for_plan=False)
         return await self.get(context, changed.conversation_id or changed.task_id)
@@ -1349,8 +1361,8 @@ class TaskService:
                 if not await tx.task_visible(task_id):
                     raise NotFoundError(task_id)
                 conversation = await tx.get_conversation(task_id, actor_scope=False)
-                owner = (conversation["actor_kind"], conversation["actor_id"]) == (context.actor_kind, context.actor_id)
-                return self.empty_conversation_view(task_id, can_message=owner)
+                owner = TrustedContext(conversation["customer_id"], conversation["actor_kind"], conversation["actor_id"])
+                return self.empty_conversation_view(task_id, can_message=await self.policy.can_control(context, owner))
             if not await self._can_view_task(context, tx, task):
                 raise NotFoundError(task_id)
             return await self.view_in_transaction(tx, task)
@@ -1363,7 +1375,9 @@ class TaskService:
             existing = await tx.find_request(context.customer_id, context.actor_id, request_key)
             if existing is None:
                 return None
-            task = await tx.load_task(existing[1])
+            task = await tx.load_task(existing[1], actor_scope=False)
+            if not await self.policy.can_control(context, task):
+                raise NotFoundError("object not found")
             return await self.view_in_transaction(tx, task)
 
     async def events(self, context, task_id, after):

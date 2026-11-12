@@ -1,5 +1,7 @@
 """Explicit per-customer policy; absence is unavailable, never implicit permission."""
 
+from robot_agent.domain.models import TrustedContext
+
 
 class ConfiguredPolicy:
     def __init__(self, identity, *, version, actions, approval_ttl_seconds):
@@ -24,6 +26,17 @@ class ConfiguredPolicy:
         return (actor is not None and task.customer_id == context.customer_id
                 and "approver" in actor.get("roles", []))
 
+    async def can_control(self, context, owner):
+        """Task origin stays immutable; customer users may manage their robots' conversations."""
+        if (context.actor_kind not in {"user", "robot"} or owner.customer_id != context.customer_id
+                or self.identity.current_actor(context) is None):
+            return False
+        if (owner.actor_kind, owner.actor_id) == (context.actor_kind, context.actor_id):
+            return True
+        if context.actor_kind != "user" or owner.actor_kind != "robot":
+            return False
+        robot = TrustedContext(owner.customer_id, "robot", owner.actor_id)
+        return self.identity.current_actor(robot) is not None
+
     async def can_cancel(self, context, task):
-        return (self.identity.current_actor(context) is not None and task.customer_id == context.customer_id
-                and task.actor_id == context.actor_id)
+        return await self.can_control(context, task)

@@ -3,7 +3,7 @@ from hashlib import sha256
 from time import perf_counter
 from uuid import uuid4
 
-from robot_agent.domain.models import ConflictError, DependencyUnavailable, PlanError, TaskInput
+from robot_agent.domain.models import ConflictError, DependencyUnavailable, NotFoundError, PlanError, TaskInput
 
 
 @dataclass(frozen=True)
@@ -63,11 +63,13 @@ class InputService:
     async def audio(self, context, audio, content_type, request_key, *, wait_for_plan=False, conversation_id=None):
         if conversation_id is not None:
             async with self.service.store.unit_of_work(context) as tx:
-                await tx.get_conversation(conversation_id)
+                await self.service.require_conversation_control(tx, context, conversation_id)
         transcript = await self.transcribe_audio(context, audio, content_type, request_key)
         if transcript.result_task_id is not None:
             async with self.service.store.unit_of_work(context) as tx:
-                task = await tx.load_task(transcript.result_task_id)
+                task = await tx.load_task(transcript.result_task_id, actor_scope=False)
+                if not await self.service.policy.can_control(context, task):
+                    raise NotFoundError("object not found")
                 if conversation_id is not None and (task.conversation_id or task.task_id) != conversation_id:
                     raise ConflictError("audio request key content conflict")
                 return await self.service.view_in_transaction(tx, task)
