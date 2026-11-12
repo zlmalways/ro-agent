@@ -1,9 +1,10 @@
+import asyncio
 from dataclasses import dataclass
 from hashlib import sha256
-from time import perf_counter
 from uuid import uuid4
 
 from robot_agent.domain.models import ConflictError, DependencyUnavailable, NotFoundError, PlanError, TaskInput
+from robot_agent.timing import TimePoint, record_timing
 
 
 @dataclass(frozen=True)
@@ -38,6 +39,9 @@ class InputService:
                     raise DependencyUnavailable("INPUT_PROCESSING")
                 if existing["state"] == "FAILED":
                     raise DependencyUnavailable("INPUT_FAILED")
+                record_timing("asr_reused", customer_id=context.customer_id, actor_id=context.actor_id,
+                              request_key=request_key, input_id=existing["input_id"],
+                              turn_id=existing["result_task_id"])
                 return TranscribedAudio(
                     existing["input_id"], existing["normalized_text"] or "",
                     existing["provider_ref"] or "", existing["result_task_id"], reused=True,
@@ -46,14 +50,27 @@ class InputService:
                 raise DependencyUnavailable("ASR_UNAVAILABLE")
             input_id = str(uuid4())
             await tx.insert_input(context, request_key, input_id, digest)
-        started = perf_counter()
+        started = TimePoint.capture()
+        timing_ids = {"customer_id": context.customer_id, "actor_id": context.actor_id,
+                      "request_key": request_key, "input_id": input_id}
+        record_timing("asr_started", at=started, **timing_ids)
         try:
             transcript = await self.asr.transcribe(audio)
-        except (DependencyUnavailable, PlanError):
-            async with self.service.store.unit_of_work(context) as tx:
-                await tx.fail_input(context, request_key)
+        except (Exception, asyncio.CancelledError) as exc:
+            finished = TimePoint.capture()
+            record_timing("asr_finished", at=finished, **timing_ids,
+                          started_at=started.utc, finished_at=finished.utc,
+                          elapsed_ms=finished.elapsed_ms(started),
+                          status="cancelled" if isinstance(exc, asyncio.CancelledError) else "failed",
+                          error_type=type(exc).__name__)
+            if isinstance(exc, (DependencyUnavailable, PlanError)):
+                async with self.service.store.unit_of_work(context) as tx:
+                    await tx.fail_input(context, request_key)
             raise
-        asr_ms = (perf_counter() - started) * 1000
+        finished = TimePoint.capture()
+        asr_ms = finished.elapsed_ms(started)
+        record_timing("asr_finished", at=finished, **timing_ids,
+                      started_at=started.utc, finished_at=finished.utc, elapsed_ms=asr_ms, status="succeeded")
         text = getattr(transcript, "text", "").strip()
         provider_ref = getattr(transcript, "provider_ref", "")
         async with self.service.store.unit_of_work(context) as tx:
@@ -82,6 +99,7 @@ class InputService:
             view = await self.service.message(context, conversation_id, value, transcript.input_id)
         async with self.service.store.unit_of_work(context) as tx:
             await tx.finish_input(context, request_key, transcript.text, transcript.provider_ref, view.turn_id or view.task_id)
+        self._record_task_link(context, request_key, transcript.input_id, view)
         return view
 
     async def submit_transcribed_audio(self, context, request_key, *, input_id, text, is_current=None):
@@ -105,7 +123,15 @@ class InputService:
             await tx.finish_input(
                 context, request_key, stored["normalized_text"], stored["provider_ref"], view.task_id,
             )
+        self._record_task_link(context, request_key, input_id, view)
         return view
+
+    @staticmethod
+    def _record_task_link(context, request_key, input_id, view):
+        # This point is after input/task linkage is committed, not task creation.
+        record_timing("input_task_linked", customer_id=context.customer_id, actor_id=context.actor_id,
+                      request_key=request_key, input_id=input_id, conversation_id=view.task_id,
+                      turn_id=view.turn_id or view.task_id)
 
     def text(self, *, request_id, text):
         if not isinstance(text, str) or not text.strip():

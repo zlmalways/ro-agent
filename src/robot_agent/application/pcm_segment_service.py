@@ -18,6 +18,7 @@ from uuid import uuid4
 import wave
 
 from robot_agent.config import PcmSegmentConfig, load_pcm_segment_config
+from robot_agent.timing import TimePoint
 
 
 _WINDOW_BYTES = 1024  # 512 signed 16-bit samples = 32 ms at 16 kHz
@@ -37,6 +38,9 @@ class AudioSegment:
     wav_bytes: bytes
     duration_ms: int
     end_reason: Literal["silence", "max_duration"]
+    first_speech_received: TimePoint | None = None
+    last_speech_received: TimePoint | None = None
+    completed_at: TimePoint | None = None
 
 
 @dataclass(frozen=True)
@@ -63,6 +67,9 @@ class PcmSession:
     _closed: bool = False
     _segment_id: str | None = None
     _speech_started_at: float | None = None
+    _packet_times: deque = field(default_factory=deque)
+    _first_speech_received: TimePoint | None = None
+    _last_speech_received: TimePoint | None = None
 
 
 def _silero_vad():
@@ -102,11 +109,13 @@ class PcmSegmentService:
             return
         session._closed = True
         session._pending.clear()
+        session._packet_times.clear()
         session._pre.clear()
         session._windows.clear()
         session._speech_windows = session._silence_windows = 0
         session._continuing = False
         session._segment_id = session._speech_started_at = None
+        session._first_speech_received = session._last_speech_received = None
         vad, session._vad = session._vad, None
         if vad is not None:
             vad.reset()
@@ -116,7 +125,8 @@ class PcmSegmentService:
         return [event for event in self.feed_pcm_events(session, pcm_bytes)
                 if isinstance(event, AudioSegment)]
 
-    def feed_pcm_events(self, session: PcmSession, pcm_bytes: bytes) -> list[SpeechActivity | AudioSegment]:
+    def feed_pcm_events(self, session: PcmSession, pcm_bytes: bytes,
+                        received_at: TimePoint | None = None) -> list[SpeechActivity | AudioSegment]:
         """Return ordered, immutable speech facts and completed WAVs.
 
         The worker owns VAD state only. Its caller applies speech activity to
@@ -128,6 +138,8 @@ class PcmSegmentService:
             raise TypeError("PCM input must be bytes")
         if len(pcm_bytes) > self.config.max_chunk_bytes:
             raise ValueError("PCM chunk exceeds max_chunk_bytes")
+        if pcm_bytes:
+            session._packet_times.append([len(pcm_bytes), received_at or TimePoint.capture()])
         session._pending.extend(pcm_bytes)
         results = []
         consumed = 0
@@ -135,10 +147,14 @@ class PcmSegmentService:
             while len(session._pending) - consumed >= _WINDOW_BYTES:
                 window = bytes(session._pending[consumed:consumed + _WINDOW_BYTES])
                 consumed += _WINDOW_BYTES
+                # Windows can span packets. Retain the actual receive points of
+                # their first/last bytes, not the later VAD processing time.
+                first_received, last_received = self._window_receive_times(session)
                 probability = session._vad.probability(window)
                 if not math.isfinite(probability) or not 0 <= probability <= 1:
                     raise ValueError("VAD returned an invalid probability")
-                results.extend(self._accept_window(session, window, probability, time.monotonic()))
+                results.extend(self._accept_window(session, window, probability, time.monotonic(),
+                                                   first_received, last_received))
         except Exception:
             # Never turn a detector failure into 'silence' and submit truncated audio.
             try:
@@ -149,7 +165,22 @@ class PcmSegmentService:
         del session._pending[:consumed]
         return results
 
-    def _accept_window(self, session, window, probability, observed_at):
+    @staticmethod
+    def _window_receive_times(session):
+        remaining = _WINDOW_BYTES
+        first = session._packet_times[0][1]
+        last = first
+        while remaining:
+            packet = session._packet_times[0]
+            consumed = min(remaining, packet[0])
+            last = packet[1]
+            packet[0] -= consumed
+            remaining -= consumed
+            if not packet[0]:
+                session._packet_times.popleft()
+        return first, last
+
+    def _accept_window(self, session, window, probability, observed_at, first_received, last_received):
         if not session._windows and not session._continuing:
             if probability <= self.config.threshold_start:
                 session._pre.append(window)
@@ -170,6 +201,10 @@ class PcmSegmentService:
             session._segment_id = str(uuid4())
         if is_speech and session._speech_started_at is None:
             session._speech_started_at = observed_at
+        if is_speech:
+            if session._first_speech_received is None:
+                session._first_speech_received = first_received
+            session._last_speech_received = last_received
         session._windows.append(window)
         events = []
         if is_speech and (session._continuing or session._speech_windows >= self._minimum):
@@ -206,7 +241,9 @@ class PcmSegmentService:
         windows, speech_windows = session._windows, session._speech_windows
         continuing = session._continuing
         segment_id = session._segment_id
+        first_received, last_received = session._first_speech_received, session._last_speech_received
         session._segment_id = session._speech_started_at = None
+        session._first_speech_received = session._last_speech_received = None
         accepted = speech_windows > 0 and (continuing or speech_windows >= self._minimum)
         session._windows = []
         session._speech_windows = 0
@@ -227,5 +264,7 @@ class PcmSegmentService:
             audio.setframerate(16000)
             audio.writeframes(b"".join(windows))
         wav_bytes = output.getvalue()
+        completed_at = TimePoint.capture()
         self._save_wav(segment_id, wav_bytes)
-        return AudioSegment(segment_id, wav_bytes, len(windows) * _WINDOW_MS, reason)
+        return AudioSegment(segment_id, wav_bytes, len(windows) * _WINDOW_MS, reason,
+                            first_received, last_received, completed_at)

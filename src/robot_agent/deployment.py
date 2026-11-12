@@ -21,6 +21,7 @@ from robot_agent.application.task_service import TaskService
 from robot_agent.config import load_provider_config
 from robot_agent.domain.models import ActionCatalog
 from robot_agent.runtime import Runtime, RuntimeOwnership, SubmissionOrderQueue
+from robot_agent.timing import configure_timing_logging
 
 
 _ASR_NOT_LOADED = object()
@@ -90,6 +91,7 @@ def build_asr(settings):
 
 
 def build_app(configuration, *, environment=None, asr_config=_ASR_NOT_LOADED):
+    configure_timing_logging()
     environment = os.environ if environment is None else environment
     if configuration.get("allow_external_calls") is not True:
         asr_config = None

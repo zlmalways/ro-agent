@@ -9,6 +9,7 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from robot_agent.application.pcm_segment_service import SpeechActivity
 from robot_agent.domain.models import ConflictError, DependencyUnavailable, PlanError
 from robot_agent.protocol.dlv0_schema import ready_frame
+from robot_agent.timing import TimePoint, record_timing
 
 
 router = APIRouter()
@@ -73,6 +74,7 @@ async def robot_ws(ws: WebSocket):
         while True:
             # Exactly one receive call path; command feedback never starts a second reader.
             raw = await ws.receive_text()
+            received_at = TimePoint.capture() if is_voice else None
             if len(raw.encode()) > robot.max_frame_bytes:
                 await ws.close(code=1009)
                 return
@@ -103,7 +105,7 @@ async def robot_ws(ws: WebSocket):
                         if pcm_session is None:
                             pcm_session = await _pcm_worker(
                                 pcm_service.new_session, cancel_cleanup=pcm_service.close_session)
-                        events = await _pcm_worker(pcm_service.feed_pcm_events, pcm_session, pcm)
+                        events = await _pcm_worker(pcm_service.feed_pcm_events, pcm_session, pcm, received_at)
                         segments = []
                         # Freeze every utterance's eligibility before any ASR
                         # await, including multiple utterances in one packet.
@@ -125,6 +127,21 @@ async def robot_ws(ws: WebSocket):
                     received_chunks += 1
                     received_bytes += len(pcm)
                     if segments:
+                        for segment in segments:
+                            first = segment.first_speech_received
+                            last = segment.last_speech_received
+                            finished = segment.completed_at
+                            record_timing(
+                                "pcm_segment", at=finished, customer_id=binding["customer_id"],
+                                actor_id=binding["binding_id"], segment_id=segment.segment_id,
+                                first_speech_received_at=first.utc if first else None,
+                                last_speech_received_at=last.utc if last else None,
+                                segment_completed_at=finished.utc if finished else None,
+                                speech_receive_span_ms=last.elapsed_ms(first) if first and last else None,
+                                endpoint_delay_ms=finished.elapsed_ms(last) if finished and last else None,
+                                first_speech_to_segment_ms=finished.elapsed_ms(first) if finished and first else None,
+                                audio_duration_ms=segment.duration_ms, end_reason=segment.end_reason,
+                            )
                         await ws.send_json({"type": "state", "state": "thinking"})
                         for segment in segments:
                             # Always return the actual cut WAV, including in the opt-in task mode.
