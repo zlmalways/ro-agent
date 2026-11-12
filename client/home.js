@@ -1,7 +1,8 @@
 'use strict';
 
 // Render only this user's persisted work. The existing task dialog owns answers and decisions.
-function createHomeBoard({request, openTask, approve, node, taskError, errorCard, taskState, actionStatus, cancellationMessage}) {
+function createHomeBoard({request, openTask, approve, node, taskError, errorCard, taskState, actionStatus, cancellationMessage,
+                          stopTask, canStop, executionControl, canExecutionAction, executionPauseMessage}) {
   const boxes = {
     questions: document.getElementById('home-questions'),
     approvals: document.getElementById('home-approvals'),
@@ -22,6 +23,8 @@ function createHomeBoard({request, openTask, approve, node, taskError, errorCard
       case 'NEEDS_CLARIFICATION': return 'questions';
       case 'WAITING_APPROVAL': return 'approvals';
       case 'RUNNING':
+      case 'PAUSE_REQUESTED':
+      case 'PAUSED':
       case 'CANCEL_REQUESTED': return 'running';
       case 'READY':
       case 'QUEUED': return 'queue';
@@ -39,6 +42,7 @@ function createHomeBoard({request, openTask, approve, node, taskError, errorCard
   function stepStatus(task, step) {
     const command = (task.result_summary || []).findLast(c => c.step_id === step.step_id);
     if (command?.evidence_conflict) return '执行回执冲突';
+    if (task.skipped_steps?.includes(step.step_id)) return '用户已跳过（原回执保留）';
     if (command?.outcome === 'SUCCEEDED' || task.completed?.includes(step.step_id)) return '已完成';
     if (command?.outcome === 'RUNNING') return '机器人执行中';
     if (command?.outcome === 'RESULT_UNKNOWN') return '结果未知';
@@ -83,7 +87,8 @@ function createHomeBoard({request, openTask, approve, node, taskError, errorCard
       const running = group === 'running';
       if (running) {
         const robot = task.result_summary?.at(-1)?.robot_binding_id || task.binding_id;
-        const state = task.state === 'CANCEL_REQUESTED' ? cancellationMessage(task) : '执行进度';
+        const state = task.state === 'CANCEL_REQUESTED' ? cancellationMessage(task) :
+          ['PAUSE_REQUESTED', 'PAUSED'].includes(task.state) ? executionPauseMessage(task) : '执行进度';
         article.append(node('p', robot ? robot + ' · ' + state : state, 'board-meta'));
       }
       const steps = task.plan_steps || [];
@@ -110,6 +115,22 @@ function createHomeBoard({request, openTask, approve, node, taskError, errorCard
         actions.append(approval);
       }
       actions.append(button(running ? '查看执行进度' : '查看详情', details));
+      if (running && task.interaction?.can_stop_execution) {
+        const stop = button('■ 停止当前动作', () => stopTask(task));
+        stop.disabled = !canExecutionAction(task, 'pause');
+        actions.append(stop);
+      }
+      if (running && ['PAUSE_REQUESTED', 'PAUSED'].includes(task.state)) {
+        const resume = button(task.state === 'PAUSE_REQUESTED' ? '等待当前动作结束' :
+          task.interaction?.resume_next_step_id ? '▶ 继续后续动作' : '确认结束本轮', () => executionControl(task, 'resume'), true);
+        resume.disabled = !canExecutionAction(task, 'resume');
+        actions.append(resume);
+        if (task.interaction?.can_end_execution) {
+          const end = button('结束本轮任务', () => stopTask(task));
+          end.disabled = !canStop(task);
+          actions.append(end);
+        }
+      }
     }
     article.append(actions);
     return article;
@@ -161,7 +182,8 @@ function createHomeBoard({request, openTask, approve, node, taskError, errorCard
   function observe(view, owned) {
     const index = items.findIndex(row => row.task_id === view.task_id);
     if (index < 0 && !owned) return;
-    if (index >= 0 && items[index].version > view.version) return;
+    if (index >= 0 && (view.turn_seq < items[index].turn_seq ||
+        (items[index].turn_id === view.turn_id && items[index].version > view.version))) return;
     requestId++; pending = false;
     if (!category(view)) {
       if (index >= 0) items.splice(index, 1);

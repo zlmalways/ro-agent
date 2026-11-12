@@ -175,11 +175,26 @@ class TaskTransaction:
 
     async def task_visible(self, task_id):
         return await self.connection.fetchval(
-            "SELECT EXISTS(SELECT 1 FROM ra_tasks t WHERE " + _TASK_READ_SCOPE
-            + " AND (t.task_id=$4 OR t.conversation_id=$4))",
+            "SELECT EXISTS(SELECT 1 FROM ra_conversations t WHERE " + _TASK_READ_SCOPE
+            + " AND t.conversation_id=$4)",
             self.context.customer_id, self.context.actor_kind, self.context.actor_id, task_id)
 
-    async def conversation_task(self, conversation_id, *, for_update=False, actor_scope=True):
+    async def get_conversation(self, conversation_id, *, actor_scope=True):
+        values = [conversation_id]
+        scope = ""
+        if self.context is not None:
+            scope = " AND customer_id=$2"
+            values.append(self.context.customer_id)
+            if actor_scope:
+                scope += " AND actor_kind=$3 AND actor_id=$4"
+                values.extend([self.context.actor_kind, self.context.actor_id])
+        row = await self.connection.fetchrow(
+            "SELECT * FROM ra_conversations WHERE conversation_id=$1" + scope, *values)
+        if row is None:
+            raise NotFoundError("object not found")
+        return row
+
+    async def conversation_task(self, conversation_id, *, for_update=False, actor_scope=True, allow_empty=False):
         """Load the newest execution turn behind a public conversation id."""
         if self.read_only and for_update:
             raise ValueError("read snapshots cannot lock a task")
@@ -205,6 +220,9 @@ class TaskTransaction:
             "SELECT task_id FROM ra_tasks WHERE conversation_id=$1" + scope
             + " ORDER BY turn_seq DESC LIMIT 1" + lock, *values)
         if row is None:
+            if allow_empty:
+                await self.get_conversation(conversation_id, actor_scope=actor_scope)
+                return None
             raise NotFoundError("object not found")
         return await self.load_task(row["task_id"], for_update=for_update, actor_scope=actor_scope)
 
@@ -286,6 +304,7 @@ class TaskTransaction:
             raise ConflictError("llm call is missing or already finished")
 
     async def create_conversation(self, customer_id, conversation_id, actor_kind, actor_id):
+        self._check_customer(customer_id, actor_id, actor_kind)
         await self.connection.execute("""
             INSERT INTO ra_conversations(customer_id,conversation_id,actor_kind,actor_id)
             VALUES ($1,$2,$3,$4)
@@ -302,6 +321,11 @@ class TaskTransaction:
             WHERE customer_id=$1 AND conversation_id=$2
             FOR UPDATE
         """, customer_id, conversation_id)
+        existing = await self.connection.fetchval(
+            "SELECT message_id FROM ra_task_messages WHERE customer_id=$1 AND message_id=$2",
+            customer_id, message_id)
+        if existing:
+            return existing
         seq = await self.connection.fetchval("""
             SELECT coalesce(max(seq),0)+1 FROM ra_task_messages
             WHERE customer_id=$1 AND task_id=$2
@@ -385,7 +409,8 @@ class TaskTransaction:
             FROM latest t LEFT JOIN ra_plans p ON p.customer_id=t.customer_id
                 AND p.task_id=t.task_id AND p.plan_id=t.active_plan_id
             WHERE (t.state IN ('NEEDS_CLARIFICATION','WAITING_APPROVAL','RUNNING',
-                               'CANCEL_REQUESTED','READY','QUEUED','BLOCKED','FAILED')
+                                'CANCEL_REQUESTED','READY','QUEUED','BLOCKED','FAILED',
+                                'PAUSE_REQUESTED','PAUSED')
                    OR t.error IS NOT NULL)
             ORDER BY t.queue_seq""", self.context.customer_id, self.context.actor_kind, self.context.actor_id)
 
@@ -411,7 +436,8 @@ class TaskTransaction:
     async def find_request(self, customer_id, actor_id, key):
         self._check_customer(customer_id, actor_id)
         row = await self.connection.fetchrow("""SELECT request_digest, result_ref FROM ra_request_keys
-            WHERE customer_id=$1 AND actor_id=$2 AND operation='submit' AND key=$3""", customer_id, actor_id, key)
+            WHERE customer_id=$1 AND actor_id=$2 AND operation IN ('submit','message') AND key=$3
+            ORDER BY created_at DESC LIMIT 1""", customer_id, actor_id, key)
         if row is None:
             # Audio admission uses its durable input_id internally. The original
             # caller only knows its upload key, including when the final input
@@ -420,7 +446,7 @@ class TaskTransaction:
                     coalesce(i.result_task_id,k.result_ref) AS result_ref
                 FROM ra_inputs i LEFT JOIN ra_request_keys k
                     ON k.customer_id=i.customer_id AND k.actor_id=i.actor_id
-                    AND k.operation='submit' AND k.key=i.input_id
+                    AND k.operation IN ('submit','message') AND k.key=i.input_id
                 WHERE i.customer_id=$1 AND i.actor_id=$2 AND i.operation='audio' AND i.key=$3
                     AND coalesce(i.result_task_id,k.result_ref) IS NOT NULL""", customer_id, actor_id, key)
         return (row["request_digest"], row["result_ref"]) if row else None
@@ -437,12 +463,17 @@ class TaskTransaction:
         turn_seq = task.turn_seq or 1
         await self.create_conversation(task.customer_id, conversation_id, task.actor_kind, task.actor_id)
         await self.connection.execute("""INSERT INTO ra_tasks
-            (customer_id,task_id,conversation_id,turn_seq,actor_kind,actor_id,goal_text,state,reason_code,version,unit_id,error,advancement_stopped,cancel_result)
-            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12::jsonb,$13,$14::jsonb)""", task.customer_id, task.task_id,
+            (customer_id,task_id,conversation_id,turn_seq,actor_kind,actor_id,goal_text,state,reason_code,version,unit_id,
+             error,advancement_stopped,cancel_result,pause_step_id,pause_command_id,pause_result,skipped_steps)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12::jsonb,$13,$14::jsonb,$15,$16,$17::jsonb,$18)""",
+                                      task.customer_id, task.task_id,
                                       conversation_id, turn_seq, task.actor_kind,
                                       task.actor_id, task.goal_text, task.state, task.reason_code, task.version, task.unit_id,
                                       _json(task.error) if task.error else None, task.advancement_stopped,
-                                      _json(task.cancel_result) if task.cancel_result else None)
+                                      _json(task.cancel_result) if task.cancel_result else None,
+                                      task.pause_step_id, task.pause_command_id,
+                                      _json(task.pause_result) if task.pause_result is not None else None,
+                                      list(task.skipped_steps))
         self.loaded_versions[task.task_id] = task.version
 
     async def load_task(self, task_id, *, for_update=False, actor_scope=True):
@@ -485,7 +516,10 @@ class TaskTransaction:
                     row["cancel_requested"], row["resume_phase"],
                     self._task_error(row), row["advancement_stopped"],
                     json.loads(row["cancel_result"]) if row["cancel_result"] else None,
-                    row["conversation_id"], row["turn_seq"])
+                    row["conversation_id"], row["turn_seq"],
+                    pause_step_id=row["pause_step_id"], pause_command_id=row["pause_command_id"],
+                    pause_result=json.loads(row["pause_result"]) if row["pause_result"] is not None else None,
+                    skipped_steps=tuple(row["skipped_steps"]))
 
     @staticmethod
     def _task_error(row):
@@ -519,13 +553,16 @@ class TaskTransaction:
             status = await self.connection.execute("""UPDATE ra_tasks SET state=$1,reason_code=$2,active_plan_id=$3,
                 completed=$4,clarification=$5,result_disputed=$6,cancel_requested=$7,resume_phase=$8,version=$9,updated_at=clock_timestamp(),
                 clarification_id=$10,answers=$11,error=$15::jsonb,
-                advancement_stopped=advancement_stopped OR $16,cancel_result=$17::jsonb
+                advancement_stopped=advancement_stopped OR $16,cancel_result=$17::jsonb,
+                pause_step_id=$18,pause_command_id=$19,pause_result=$20::jsonb,skipped_steps=$21
                 WHERE customer_id=$12 AND task_id=$13 AND version=$14
                 AND (NOT advancement_stopped OR $16)""", task.state, task.reason_code,
                 task.plan.plan_id if task.plan else None, list(task.completed), task.clarification, task.result_disputed,
                 task.cancel_requested, task.resume_phase, task.version, task.clarification_id, list(task.answers),
                 task.customer_id, task.task_id, expected, _json(task.error) if task.error else None,
-                task.advancement_stopped, _json(task.cancel_result) if task.cancel_result else None)
+                task.advancement_stopped, _json(task.cancel_result) if task.cancel_result else None,
+                task.pause_step_id, task.pause_command_id,
+                _json(task.pause_result) if task.pause_result is not None else None, list(task.skipped_steps))
             if status != "UPDATE 1":
                 raise ConflictError("task version changed")
             if task.plan:
@@ -533,7 +570,8 @@ class TaskTransaction:
                     await self.connection.execute("""INSERT INTO ra_plans
                         (customer_id,plan_id,task_id,revision,steps,snapshot) VALUES ($1,$2,$3,$4,$5::jsonb,$6::jsonb)""",
                         task.customer_id, task.plan.plan_id, task.task_id, task.plan.revision, steps_json, snapshot_json)
-                next_step = next((step.step_id for step in task.plan.steps if step.step_id not in task.completed), None)
+                next_step = next((step.step_id for step in task.plan.steps
+                                  if step.step_id not in task.completed and step.step_id not in task.skipped_steps), None)
                 await self.connection.execute("""INSERT INTO ra_units
                     (customer_id,unit_id,task_id,plan_id,binding_id,state,next_step_id,version)
                     VALUES ($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT (customer_id,unit_id) DO UPDATE

@@ -19,6 +19,10 @@ def fact_message(view):
     if view.state == "SUCCEEDED":
         steps = "；".join(row.get("description", row["action"]) for row in view.result_summary if row["outcome"] == "SUCCEEDED")
         return "机器人报告任务已完成。" + steps
+    if view.state == "COMPLETED_WITH_SKIPS":
+        return "本轮执行已结束，包含由用户跳过的步骤。跳过的动作不计为成功。"
+    if view.state in {"PAUSE_REQUESTED", "PAUSED"}:
+        return "后续动作已暂停，请在网页查看当前动作的结果，并选择继续或结束本轮任务。"
     if view.state == "BLOCKED":
         return "原任务已停止推进，执行条件或结果需要核对。请在网页查看详情。"
     if view.state == "CANCEL_REQUESTED":

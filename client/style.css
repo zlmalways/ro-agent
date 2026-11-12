@@ -518,6 +518,12 @@ body.chat-open main > header, body.chat-open main > section:not(#conversation) {
 .chat-composer { padding: 16px 18px; background: var(--paper); border: 1px solid var(--line); border-radius: 17px; box-shadow: 0 4px 18px #31395e12; }
 .chat-composer textarea { border: 0; padding: 0; margin: 0; min-height: 58px; background: transparent; }
 .chat-composer textarea:focus-visible { outline-offset: 5px; }
+.chat-composer.is-disabled { background: #f3f4f6; border-color: #e1e3e8; box-shadow: none; }
+.chat-composer textarea:disabled { color: #858c9b; -webkit-text-fill-color: #858c9b; opacity: 1; cursor: default; resize: none; }
+.chat-composer textarea:disabled::placeholder { color: #858c9b; opacity: 1; }
+.chat-composer.is-disabled #send:disabled { color: #8b929f; background: #e4e7ec; border-color: #e1e3e8; opacity: 1; }
+#active-composer { margin-top: 16px; box-shadow: none; }
+.conversation-message .assistant-content > div { white-space: pre-wrap; }
 .composer-actions { display: flex; align-items: center; justify-content: space-between; gap: 14px; margin-top: 12px; }
 .composer-actions button { flex-shrink: 0; }
 #composer-message { min-height: 42px; margin: 0; color: var(--muted); }

@@ -246,6 +246,12 @@ class Task:
     # conversation id is stable across all turns in one chat session.
     conversation_id: str = ""
     turn_seq: int = 0
+    # Execution pauses retain the plan; cancellation still ends the whole turn.
+    pause_step_id: str = ""
+    pause_command_id: str = ""
+    pause_result: Mapping[str, Any] | None = None
+    # User-skipped steps are not successful robot execution evidence.
+    skipped_steps: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -277,6 +283,11 @@ class TaskView:
     turn_id: str = ""
     turn_seq: int = 0
     messages: tuple[dict, ...] = ()
+    interaction: Mapping[str, Any] = field(default_factory=dict)
+    pause_step_id: str = ""
+    pause_command_id: str = ""
+    pause_result: Mapping[str, Any] | None = None
+    skipped_steps: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)

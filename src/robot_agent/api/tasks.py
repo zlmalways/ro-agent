@@ -9,6 +9,19 @@ from robot_agent.domain.models import ConflictError, DependencyUnavailable, NotF
 router = APIRouter()
 
 
+@router.post("/api/robot-agent/conversations", status_code=201)
+async def create_conversation(request: Request):
+    from .resources import web_context
+    context = await web_context(request)
+    try:
+        return asdict(await request.app.state.service.create_conversation(
+            context, request.headers.get("idempotency-key", "")))
+    except PlanError as exc:
+        raise HTTPException(422, str(exc)) from None
+    except DependencyUnavailable as exc:
+        raise HTTPException(503, str(exc)) from None
+
+
 @router.post("/api/robot-agent/tasks", status_code=202)
 async def submit(request: Request):
     auth = request.headers.get("authorization", "")
@@ -96,11 +109,48 @@ async def get_task(task_id: str, request: Request):
 class CancelInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
     expected_version: int
+    expected_turn_id: str | None = None
 
 
 class MessageInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
     text: str
+
+
+class ExecutionControlInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    expected_version: int
+    expected_turn_id: str
+    plan_id: str
+    expected_command_id: str
+
+
+async def _execution_control(task_id, body, request, operation):
+    from .resources import web_context
+    context = await web_context(request)
+    service = request.app.state.service
+    call = service.pause_execution if operation == "pause" else service.resume_execution
+    try:
+        return asdict(await call(context, task_id, body.expected_version,
+                                 request.headers.get("idempotency-key", ""),
+                                 expected_turn_id=body.expected_turn_id, plan_id=body.plan_id,
+                                 expected_command_id=body.expected_command_id))
+    except PermissionError as exc:
+        raise HTTPException(403, str(exc)) from None
+    except NotFoundError:
+        raise HTTPException(404, "NOT_FOUND") from None
+    except (ConflictError, PlanError) as exc:
+        raise HTTPException(409, str(exc)) from None
+
+
+@router.post("/api/robot-agent/tasks/{task_id}/stop-current")
+async def stop_current_action(task_id: str, body: ExecutionControlInput, request: Request):
+    return await _execution_control(task_id, body, request, "pause")
+
+
+@router.post("/api/robot-agent/tasks/{task_id}/resume-execution")
+async def resume_execution(task_id: str, body: ExecutionControlInput, request: Request):
+    return await _execution_control(task_id, body, request, "resume")
 
 
 @router.post("/api/robot-agent/tasks/{task_id}/messages", status_code=202)
@@ -125,6 +175,26 @@ async def task_message(task_id: str, body: MessageInput, request: Request):
     return asdict(view)
 
 
+@router.post("/api/robot-agent/tasks/{task_id}/messages/audio", status_code=202)
+async def conversation_audio(task_id: str, request: Request, audio: UploadFile = File(...)):
+    from .resources import web_context
+    context = await web_context(request)
+    try:
+        view = await request.app.state.inputs.audio(
+            context, await audio.read(request.app.state.inputs.max_audio_bytes + 1),
+            audio.content_type or "", request.headers.get("idempotency-key", ""),
+            conversation_id=task_id)
+        return asdict(view)
+    except NotFoundError:
+        raise HTTPException(404, "NOT_FOUND") from None
+    except ConflictError as exc:
+        raise HTTPException(409, str(exc)) from None
+    except PlanError as exc:
+        raise HTTPException(422, str(exc)) from None
+    except DependencyUnavailable as exc:
+        raise HTTPException(503, str(exc)) from None
+
+
 @router.post("/api/robot-agent/tasks/{task_id}/cancel")
 async def cancel_task(task_id: str, body: CancelInput, request: Request):
     auth = request.headers.get("authorization", "")
@@ -133,7 +203,8 @@ async def cancel_task(task_id: str, body: CancelInput, request: Request):
     try:
         context = await request.app.state.identity.resolve_web(auth[7:])
         return asdict(await request.app.state.service.cancel(context, task_id, body.expected_version,
-                                                              request.headers.get("idempotency-key", "")))
+                                                              request.headers.get("idempotency-key", ""),
+                                                              expected_turn_id=body.expected_turn_id))
     except PermissionError as exc:
         raise HTTPException(403, str(exc)) from None
     except (ConflictError, PlanError) as exc:

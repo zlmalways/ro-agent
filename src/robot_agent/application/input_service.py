@@ -60,19 +60,26 @@ class InputService:
             await tx.finish_input(context, request_key, text, provider_ref)
         return TranscribedAudio(input_id, text, provider_ref, asr_ms=asr_ms)
 
-    async def audio(self, context, audio, content_type, request_key, *, wait_for_plan=False):
+    async def audio(self, context, audio, content_type, request_key, *, wait_for_plan=False, conversation_id=None):
+        if conversation_id is not None:
+            async with self.service.store.unit_of_work(context) as tx:
+                await tx.get_conversation(conversation_id)
         transcript = await self.transcribe_audio(context, audio, content_type, request_key)
         if transcript.result_task_id is not None:
             async with self.service.store.unit_of_work(context) as tx:
-                return await self.service.view_in_transaction(tx, await tx.load_task(transcript.result_task_id))
+                task = await tx.load_task(transcript.result_task_id)
+                if conversation_id is not None and (task.conversation_id or task.task_id) != conversation_id:
+                    raise ConflictError("audio request key content conflict")
+                return await self.service.view_in_transaction(tx, task)
         if not transcript.text:
             raise PlanError("ASR_EMPTY")
-        view = await self.service.submit(
-            context, TaskInput(transcript.input_id, "audio", transcript.text, transcript.input_id),
-            transcript.input_id, wait_for_plan=wait_for_plan,
-        )
+        value = TaskInput(transcript.input_id, "audio", transcript.text, transcript.input_id)
+        if conversation_id is None:
+            view = await self.service.submit(context, value, transcript.input_id, wait_for_plan=wait_for_plan)
+        else:
+            view = await self.service.message(context, conversation_id, value, transcript.input_id)
         async with self.service.store.unit_of_work(context) as tx:
-            await tx.finish_input(context, request_key, transcript.text, transcript.provider_ref, view.task_id)
+            await tx.finish_input(context, request_key, transcript.text, transcript.provider_ref, view.turn_id or view.task_id)
         return view
 
     async def submit_transcribed_audio(self, context, request_key, *, input_id, text, is_current=None):

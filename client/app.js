@@ -8,6 +8,7 @@ const pages = {
   settings: '设置'
 };
 const states = {
+  IDLE: '新会话',
   RECEIVED: '正在处理',
   RECEIVING: '正在提交',
   PLANNING: '正在生成计划',
@@ -16,6 +17,9 @@ const states = {
   READY: '等待执行',
   QUEUED: '正在排队',
   RUNNING: '执行中',
+  PAUSE_REQUESTED: '正在停止当前动作',
+  PAUSED: '执行已暂停',
+  COMPLETED_WITH_SKIPS: '执行结束，包含跳过步骤',
   BLOCKED: '后续执行已结束',
   CANCEL_REQUESTED: '正在停止，等待机器人确认',
   SUCCEEDED: '已完成',
@@ -31,7 +35,7 @@ const outcomes = {
 };
 let credential = '', actorId = '',
   currentTask = null,
-  page = 'chat',
+  page = 'home',
   rows = [],
   nextBefore = null,
   stateCounts = null;
@@ -45,11 +49,14 @@ let pendingWrite = null,
   recording = null,
   micRequest = 0;
 let submission = null;
+let conversationEntered = false, creatingConversation = false, creationRequest = null;
 let fleetSelection = null, fleetLoading = false, fleetExpiry = null;
 let fleetView = null; // Last complete list/detail read; pending reads never partly replace it.
 let returnPage = 'home';
 const stopRequests = new Map();
-const endedStates = new Set(['SUCCEEDED', 'FAILED', 'CANCELLED']);
+const endedStates = new Set(['SUCCEEDED', 'COMPLETED_WITH_SKIPS', 'FAILED', 'CANCELLED']);
+const executionPending = new Set();
+const executionAttempts = new Map(readSessionList('deepleap.execution-attempts').filter(item => Array.isArray(item) && item.length === 2));
 const errorDetailsOpen = new Set();
 const announcedErrors = new Set(readSessionList('deepleap.error-notices'));
 const attemptedStops = new Set(readSessionList('deepleap.stop-attempts'));
@@ -99,6 +106,11 @@ function requestErrorReason(error) {
     APPROVAL_DENIED:'当前用户无权批准这个任务。',
     APPROVAL_VALIDITY_UNAVAILABLE:'无法确认批准的有效期限。',
     CANCEL_POLICY_UNAVAILABLE:'停止权限检查暂不可用，无法受理这次停止。',
+    EXECUTION_CONTROL_ID_REQUIRED:'缺少本轮任务或计划标识，请刷新任务状态。',
+    EXECUTION_NOT_PAUSABLE:'当前状态不允许停止当前动作，请刷新任务状态。',
+    EXECUTION_NOT_RESUMABLE:'当前动作尚未确认结束，或任务已不能继续。',
+    CURRENT_ACTION_CHANGED:'当前动作已变化，本次操作未受理，请刷新后核对。',
+    ALLOCATION_LOST:'任务已不再占用原机器人，不能继续执行。',
     AUTHORIZATION_UNAVAILABLE:'暂时无法确认任务执行权限。',
     AUTHORIZATION_DENY:'当前权限不允许执行这个任务。',
     PERSISTENCE_UNCONFIRMED:'任务记录未能确认保存，操作结果尚未确认。',
@@ -107,6 +119,8 @@ function requestErrorReason(error) {
     NOT_FOUND:'未找到可访问的任务。',
     UNAUTHENTICATED:'访问凭据无效，请重新连接服务。',
     'task version changed':'任务状态已变化，本次操作未受理。',
+    'turn version changed':'当前会话已进入下一轮，本次停止未受理。',
+    'conversation has an active turn':'当前轮仍在处理，请等待本轮回复或执行结果。',
     'plan version changed':'计划已变化，本次批准未受理。',
     'clarification version changed':'需要回答的问题已变化，本次回答未受理。',
     'task does not await approval':'这个任务当前不在等待批准。',
@@ -157,6 +171,7 @@ const board = createHomeBoard({
   taskState,
   actionStatus,
   cancellationMessage,
+  stopTask, canStop, executionControl, canExecutionAction, executionPauseMessage,
   approve(task) {
     // Authorize precisely the plan/version shown on the card.
     return write('/tasks/' + encodeURIComponent(task.task_id) + '/decisions',
@@ -192,6 +207,7 @@ async function api(path, options = {}, token = credential) {
 }
 
 function conversation(open, updateRoute = true) {
+  open = open && conversationEntered;
   if (updateRoute) {
     if (open && page !== 'chat' && page !== 'settings') returnPage = page;
     const target = open ? 'chat' : returnPage;
@@ -201,10 +217,7 @@ function conversation(open, updateRoute = true) {
   }
   document.body.classList.toggle('chat-open', open);
   $('conversation').hidden = !open;
-  $('dock').hidden = open;
-  $('dock').setAttribute('aria-expanded', String(open));
-  if (open)(canSendMessage(currentTask) ? $('goal') : currentTask ? $('new-task') :
-    submission?.ticket === selection ? $('cancel') : $('goal')).focus();
+  if (open && canSendMessage(currentTask) && !$('goal').disabled) $('goal').focus();
 }
 
 function stopRecording() {
@@ -220,22 +233,43 @@ function blankTask() {
   selection++;
   stopRecording();
   currentTask = null;
+  conversationEntered = false;
   $('conversation-history').replaceChildren();
   $('task-detail').hidden = true;
   $('chat-empty').hidden = false;
   $('active-composer').hidden = true;
   $('task-error-card').hidden = $('cancel-result').hidden = true;
-  $('submit-form').hidden = $('voice-input').hidden = false;
   $('goal').value = $('answer').value = $('audio').value = '';
   $('error').textContent = '';
   updateControls();
 }
 
+function stopKey(task) {
+  return actorId + ':' + (task?.turn_id || task?.task_id || '');
+}
+
 function canStop(task) {
-  if (!task || endedStates.has(task.state) || task.state === 'CANCEL_REQUESTED' || task.cancel_result ||
-      stopRequests.has(task.task_id) || attemptedStops.has(task.task_id)) return false;
-  const error = taskError(task);
-  return !error || error.execution_status === 'UNKNOWN';
+  if (!task || stopRequests.has(stopKey(task)) || attemptedStops.has(stopKey(task))) return false;
+  if (executionPending.has(stopKey(task))) return false;
+  return Boolean(task.interaction?.can_pause || task.interaction?.can_stop || task.interaction?.can_end_execution);
+}
+
+function canExecutionAction(task, operation) {
+  return Boolean(task && !executionPending.has(stopKey(task)) &&
+    task.interaction?.[operation === 'pause' ? 'can_stop_execution' : 'can_resume_execution']);
+}
+
+function executionPauseMessage(task) {
+  if (task.state === 'PAUSE_REQUESTED') {
+    const delivery = task.pause_result?.status;
+    return (delivery === 'NOT_SENT' ? '停止请求未能发送；' : delivery === 'UNKNOWN' ? '停止请求是否送达未确认；' : '') +
+      '后续步骤已暂停，等待当前动作的结束回执。';
+  }
+  const next = task.plan_steps?.find(step => step.step_id === task.interaction?.resume_next_step_id);
+  const current = task.plan_steps?.find(step => step.step_id === task.pause_step_id);
+  const skip = task.interaction?.resume_skips_current && current ? '继续时将跳过：' + current.description + '。' : '';
+  const pending = task.pause_result?.status === 'PENDING' ? '正在确认停止请求的发送结果。' : '';
+  return pending + skip + (next ? '等待你继续，下一步：' + next.description : '没有后续步骤，确认后结束本轮。');
 }
 
 function taskRobots(view) {
@@ -251,87 +285,116 @@ function taskRow(row) {
   open.append(node('span', row.goal_text), node('small', when + taskState(row)));
   if (!row.pending) open.append(node('small', taskRobots(row), 'task-description'));
   open.onclick = () => row.pending ? openSubmission() : openTask(row.task_id);
-  const stopError = stopRequests.get(row.task_id)?.error;
+  const stopError = stopRequests.get(stopKey(row))?.error;
   const description = row.cancel_result ? cancellationMessage(row) : stopError || (taskError(row) ? '' : taskReason(row));
   if (description) open.append(node('small', description, 'task-description'));
   el.append(open);
   if (taskError(row)) { el.classList.add('task-row-error'); el.append(errorCard(row)); }
   if (canStop(row)) {
-    const busy = row.pending ? submission?.stopRequested : stopRequests.get(row.task_id)?.busy;
-    const stop = node('button', taskError(row) ? '请求停止机器人' : busy ? '正在停止…' : '■ 停止', 'quiet task-stop');
+    const busy = row.pending ? submission?.stopRequested : stopRequests.get(stopKey(row))?.busy;
+    const stop = node('button', row.interaction?.can_stop_execution ? '■ 停止当前动作' :
+      row.interaction?.can_end_execution ? '结束本轮任务' : taskError(row) ? '请求停止机器人' : busy ? '正在停止…' : '■ 停止', 'quiet task-stop');
     stop.setAttribute('aria-label', '停止任务：' + row.goal_text);
     stop.disabled = Boolean(busy);
     stop.onclick = () => row.pending ? stopSubmission() : stopTask(row);
     el.append(stop);
   }
+  if (row.state === 'PAUSED' || row.state === 'PAUSE_REQUESTED') {
+    const resume = node('button', row.interaction?.resume_next_step_id ? '▶ 继续后续动作' :
+      row.state === 'PAUSE_REQUESTED' ? '等待当前动作结束' : '确认结束本轮', 'task-stop');
+    resume.disabled = !canExecutionAction(row, 'resume');
+    resume.onclick = () => executionControl(row, 'resume');
+    el.append(resume);
+  }
   return el;
 }
 
-function canContinueTask(task) {
-  if (!task || task.state === 'CANCEL_REQUESTED') return false;
-  return endedStates.has(task.state) || task.advancement_stopped === true;
-}
-
 function canSendMessage(task) {
-  return !task || task.state === 'NEEDS_CLARIFICATION' || canContinueTask(task);
+  return Boolean(task?.interaction?.can_message);
 }
 
 function updateControls() {
-  const visibleSubmission = submission?.ticket === selection;
-  const mayCompose = currentTask ? canSendMessage(currentTask) : !visibleSubmission;
-  $('submit-form').hidden = !mayCompose;
-  // Keep follow-up changes limited to text; existing audio entry remains for a blank chat.
-  $('voice-input').hidden = Boolean(currentTask || visibleSubmission);
-  $('send').disabled = !credential || writing || !mayCompose || !$('goal').value.trim();
-  $('goal').placeholder = currentTask ? '继续输入下一条任务…' : '描述你想让机器人做的事…';
-  $('continuation-note').hidden = !currentTask || !mayCompose;
-  $('audio-submit').disabled = !credential || writing;
-  if (!recording) $('record').disabled = !credential || writing;
-  $('chat-access-note').hidden = Boolean(credential);
-  $('answer-form').querySelector('button').disabled = writing || Boolean(actionStatus(currentTask, 'answer'));
-  $('answer').disabled = Boolean(actionStatus(currentTask, 'answer'));
-  $('approve').disabled = writing || Boolean(actionStatus(currentTask, 'approve'));
-  $('reject').disabled = writing || Boolean(actionStatus(currentTask, 'reject'));
-  const pending = submission && submission.ticket === selection && !currentTask;
+  const pending = submission?.ticket === selection;
   const task = currentTask;
-  const ending = task && endedStates.has(task.state);
-  const failed = task && Boolean(taskError(task));
+  const inConversation = page === 'chat' && conversationEntered;
+  const phase = pending ? 'planning' : task?.interaction?.phase || 'unavailable';
+  const planning = phase === 'planning';
+  const mayCompose = inConversation && canSendMessage(task) && !pending && !writing && !creatingConversation;
+  $('submit-form').hidden = !inConversation;
+  $('submit-form').classList.toggle('is-disabled', !mayCompose);
+  $('goal').disabled = !mayCompose;
+  $('goal').placeholder = creatingConversation ? '正在建立会话…' :
+    phase === 'approval' ? '请确认或拒绝上方执行计划' :
+    phase === 'execution_paused' ? '执行已暂停，请选择继续或结束本轮' :
+    phase === 'execution_stopping' ? '正在停止当前动作，等待机器人回执…' :
+    phase === 'stopping' ? '正在停止，等待机器人确认…' :
+    phase === 'executing' ? '任务执行中…' :
+    planning ? 'Agent 正在规划…' : '在当前会话中输入…';
+  $('send').hidden = planning;
+  $('send').disabled = !credential || !mayCompose || !$('goal').value.trim();
+  $('pause-planning').hidden = !inConversation || !planning;
+  $('pause-planning').disabled = pending ? Boolean(submission.stopRequested || submission.unconfirmed) :
+    !canStop(task) || !task?.interaction?.can_pause;
+  $('pause-planning').textContent = (pending && submission.stopRequested) ||
+    stopRequests.get(stopKey(task))?.busy ? '正在暂停…' : 'Ⅱ 暂停';
+  $('continuation-note').hidden = !mayCompose || !task?.turn_id;
+  // Retain the original first-message voice entry; it submits to this conversation.
+  $('voice-input').hidden = !inConversation || Boolean(task?.turn_id) || pending;
+  $('audio-submit').disabled = !credential || !mayCompose;
+  if (!recording) $('record').disabled = !credential || !mayCompose;
+  $('chat-access-note').hidden = Boolean(credential);
+  for (const id of ['new-task', 'sidebar-new', 'compose', 'followup-new']) $(id).disabled = creatingConversation;
+  $('answer-form').hidden = true;
+  $('answer-form').querySelector('button').disabled = true;
+  $('answer').disabled = true;
+  for (const action of ['approve', 'reject']) {
+    $(action).disabled = writing || !task?.interaction?.can_decide || Boolean(actionStatus(task, action));
+  }
   let actionNotice = $('action-result');
   if (!actionNotice) {
     actionNotice = node('p', '', 'hint');
     actionNotice.id = 'action-result';
     $('decisions').after(actionNotice);
   }
-  const actions = !failed && task?.state === 'NEEDS_CLARIFICATION' ? ['answer'] :
-    !failed && task?.state === 'WAITING_APPROVAL' ? ['approve', 'reject'] : [];
-  actionNotice.textContent = actions.map(action => actionStatus(task, action)).filter(Boolean).join(' ');
+  actionNotice.textContent = phase === 'approval' ?
+    ['approve', 'reject'].map(action => actionStatus(task, action)).filter(Boolean).join(' ') : '';
   actionNotice.hidden = !actionNotice.textContent;
   const unconfirmed = pending && submission.unconfirmed;
-  const stopError = stopRequests.get(task?.task_id)?.error;
-  const stopRejected = stopRequests.get(task?.task_id)?.rejected;
-  const waiting = task?.state === 'CANCEL_REQUESTED';
-  const busy = pending ? submission.stopRequested : stopRequests.get(task?.task_id)?.busy;
-  const stopAttempted = task && (task.cancel_result || attemptedStops.has(task.task_id));
-  $('cancel').hidden = task ? !canStop(task) : !pending || Boolean(unconfirmed);
+  const stopRequest = stopRequests.get(stopKey(task));
+  const stopAttempted = task?.cancel_result || attemptedStops.has(stopKey(task));
+  const executionPaused = phase === 'execution_paused' || phase === 'execution_stopping';
+  const executionControls = phase === 'executing' || phase === 'stopping' || executionPaused;
+  $('active-composer').hidden = !(executionControls || unconfirmed || stopRequest?.error);
+  $('cancel').hidden = !executionControls || !task?.interaction?.can_stop;
+  $('cancel').disabled = writing || !canStop(task);
+  $('cancel').textContent = executionPending.has(stopKey(task)) ? '正在停止…' :
+    task?.interaction?.can_stop_execution ? '■ 停止当前动作' : stopRequest?.busy ? '正在停止…' : '■ 停止执行';
+  $('resume-execution').hidden = !executionPaused;
+  $('resume-execution').disabled = !canExecutionAction(task, 'resume');
+  $('resume-execution').textContent = executionPending.has(stopKey(task)) ? '正在处理…' :
+    phase === 'execution_stopping' ? '等待当前动作结束' :
+    task?.interaction?.resume_next_step_id ? '▶ 继续后续动作' : '确认结束本轮';
+  $('end-execution').hidden = !task?.interaction?.can_end_execution;
+  $('end-execution').disabled = !canStop(task);
   $('refresh-task').hidden = !task && !unconfirmed;
   $('refresh-task').disabled = Boolean(submission?.checking);
   $('refresh-task').textContent = unconfirmed ? '查询提交结果' : '刷新任务状态';
   $('followup-new').hidden = !unconfirmed;
-  $('active-composer').hidden = !pending && (!task || (mayCompose && !failed && !canStop(task)));
-  $('cancel').disabled = Boolean(waiting || busy);
-  $('cancel').textContent = failed ? '请求停止机器人' : busy ? '正在停止…' : '■ 停止';
-  $('composer-message').textContent = unconfirmed ? '提交结果未确认' : failed ? '后续执行已结束，此任务不会继续' : ending ? '这个任务已结束' : waiting ? cancellationMessage(task) : stopError ? (stopRejected ? '停止请求未受理' : '停止请求结果未确认') : stopAttempted ? '停止请求已尝试，结果以任务记录为准' : pending ? '正在提交任务' : normalComposerMessage(task);
-  $('stop-hint').textContent = unconfirmed ? '只查询原请求，不会重新提交' : failed ? errorFooter(taskError(task)) : stopError ? '不会再次发送停止请求，只可刷新任务状态' : ending ? '原始任务和已有记录会保留' : pending && submission.stopRequested ? '等待接收确认后请求停止任务' : waiting || stopAttempted ? '不会再次发送停止请求；收到可靠回执才确认动作结束' : '停止后不再继续这个任务';
+  $('composer-message').textContent = executionPaused ? executionPauseMessage(task) : unconfirmed ? '提交结果未确认' :
+    stopRequest?.error || (phase === 'stopping' ? cancellationMessage(task) : normalComposerMessage(task));
+  $('stop-hint').textContent = executionPaused ? '保留原计划，点击继续后才执行后续动作' :
+    task?.interaction?.can_stop_execution ? '停止当前动作，保留后续步骤，等待手动继续' :
+    unconfirmed ? '只查询原请求，不会重新提交' :
+    stopAttempted ? '停止请求已尝试；收到可靠回执才确认动作结束' : '停止后不再执行后续步骤';
 }
 
 function renderPending() {
   $('task-robots').textContent = '';
   if (!submission || submission.ticket !== selection) return;
-  currentTask = null;
+  currentTask = submission.previousTask || null;
   $('chat-empty').hidden = true;
+  if (currentTask) renderMessages(currentTask);
   $('task-detail').hidden = $('active-composer').hidden = false;
-  $('submit-form').hidden = true;
-  $('voice-input').hidden = true;
   $('task-goal').parentElement.hidden = false;
   $('task-goal').textContent = submission.goal;
   $('sent-status').textContent = submission.unconfirmed ? '提交结果未确认' : '正在发送';
@@ -348,6 +411,7 @@ function renderPending() {
 function openSubmission() {
   if (!submission) return;
   blankTask();
+  conversationEntered = true;
   submission.ticket = selection;
   renderPending(); conversation(true);
 }
@@ -375,7 +439,8 @@ function renderHistory() {
       $(id).append(node('p', message, 'empty'));
     }
   }
-  $('thread-history').replaceChildren(...shown.slice(0, 6).map(row => {
+  const threads = currentTask?.state === 'IDLE' ? [{...currentTask, goal_text: '新会话'}, ...shown] : shown;
+  $('thread-history').replaceChildren(...threads.slice(0, 6).map(row => {
     const button = node('button', '', 'thread-row');
     button.append(node('span', row.goal_text), node('small', taskState(row)));
     if (currentTask?.task_id === row.task_id && row.task_id) button.setAttribute('aria-current', 'page');
@@ -385,7 +450,7 @@ function renderHistory() {
   $('more').hidden = nextBefore == null;
   const unknown = credential ? '待同步' : '—';
   $('recent-count').textContent = stateCounts ? totalTasks(stateCounts) : unknown;
-  $('waiting-count').textContent = stateCounts ? ['NEEDS_CLARIFICATION', 'WAITING_APPROVAL', 'BLOCKED']
+  $('waiting-count').textContent = stateCounts ? ['NEEDS_CLARIFICATION', 'WAITING_APPROVAL', 'BLOCKED', 'PAUSED', 'PAUSE_REQUESTED']
     .reduce((n, state) => n + (stateCounts[state] || 0), 0) : unknown;
   $('active-count').textContent = stateCounts ? stateCounts.RUNNING || 0 : unknown;
 }
@@ -393,7 +458,8 @@ function renderHistory() {
 function rememberTask(view, submittedHere) {
   // A detail can belong to a different user whose plan this user may approve.
   const previous = rows.find(row => row.task_id === view.task_id);
-  if (previous && previous.turn_id === view.turn_id && previous.version > view.version) return;
+  if (previous && (view.turn_seq < previous.turn_seq ||
+      (previous.turn_id === view.turn_id && previous.version > view.version))) return;
   if (previous && previous.turn_id === view.turn_id && previous.version === view.version) {
     Object.assign(previous, view);
     renderHistory();
@@ -445,6 +511,8 @@ function resetIdentity() {
   credential = '';
   actorId = '';
   submission = null;
+  creationRequest = null;
+  creatingConversation = false;
   stopRequests.clear();
   clearTimeout(errorNoticeTimer);
   $('task-alert').textContent = '';
@@ -483,7 +551,7 @@ $('settings-form').onsubmit = async event => {
     actorId = identity.actor_id;
     $('connection-status').textContent = '已连接 · ' + identity.actor_id;
     renderHistory();
-    if (page === 'settings') location.hash = 'chat';
+    if (page === 'settings') location.hash = 'home';
     else navigate();
   } catch (error) {
     if (epoch !== identityEpoch) return;
@@ -589,9 +657,9 @@ async function loadRobot(bindingId) {
 
 function navigate() {
   const target = location.hash.slice(1);
-  page = Object.hasOwn(pages, target) ? target : 'chat';
+  page = target === 'chat' && conversationEntered ? 'chat' : Object.hasOwn(pages, target) ? target : 'home';
   if (page !== 'chat' && page !== 'settings') returnPage = page;
-  if (page === 'chat' && target !== 'chat') history.replaceState(null, '', '#chat');
+  if (page !== target) history.replaceState(null, '', '#' + page);
   // The original home board and fleet remain explicit navigation destinations.
   for (const id of Object.keys(pages)) $(id).hidden = page !== id && !(id === 'robots' && page === 'home');
   document.querySelectorAll('nav a').forEach(a => {
@@ -707,6 +775,7 @@ function cancellationMessage(view) {
 
 function taskReason(view) {
   if (taskError(view)) return taskError(view).message;
+  if (view.state === 'PAUSED' || view.state === 'PAUSE_REQUESTED') return executionPauseMessage(view);
   if (view.cancel_result || view.state === 'CANCEL_REQUESTED') return cancellationMessage(view);
   if (view.reason_code === "ROBOT_DISABLED") return "机器人已停用：平台已结束此任务，不会继续后续步骤。已发动作是否停止仍以机器人回执为准。";
   if (view.reason_code === "RESTART_TASK_LOST") return "重启任务丢失：平台已结束旧任务，不会继续后续步骤。机器人动作结果以回执为准。";
@@ -730,6 +799,7 @@ function taskReason(view) {
     WAITING_APPROVAL: '计划等待批准，请在对话中核对。',
     CANCELLED: '这个任务已结束，后续步骤不再执行。动作结果以机器人回执为准。',
     SUCCEEDED: '机器人已报告任务完成。',
+    COMPLETED_WITH_SKIPS: '本轮执行已结束，包含由用户跳过的步骤；跳过的动作不计为成功。',
     FAILED: '任务没有完成，请在对话中查看原因。'
   }[view.state] || '');
 }
@@ -751,10 +821,10 @@ function renderMessages(view) {
 }
 
 function renderConversation(view) {
-  if (currentTask?.task_id === view.task_id && currentTask.turn_seq === view.turn_seq &&
-      view.version < currentTask.version) return;
+  if (currentTask?.task_id === view.task_id && (view.turn_seq < currentTask.turn_seq ||
+      (currentTask.turn_seq === view.turn_seq && view.version < currentTask.version))) return;
   if (endedStates.has(view.state) || view.state === 'CANCEL_REQUESTED') {
-    const stopRequest = stopRequests.get(view.task_id);
+    const stopRequest = stopRequests.get(stopKey(view));
     if (stopRequest) { stopRequest.resolved = true; delete stopRequest.error; }
     if (/^停止(?:尚未确认|请求未受理|请求结果未确认)：/.test($('error').textContent)) $('error').textContent = '';
   }
@@ -765,13 +835,12 @@ function renderConversation(view) {
   }
   currentTask = view;
   renderMessages(view);
-  $('chat-empty').hidden = true;
-  $('active-composer').hidden = false;
+  $('chat-empty').hidden = view.state !== 'IDLE';
+  $('active-composer').hidden = true;
   $('task-reference').hidden = false;
   $('sent-status').textContent = '已提交';
-  $('task-detail').hidden = false;
+  $('task-detail').hidden = view.state === 'IDLE';
   $('task-goal').parentElement.hidden = true;
-  $('submit-form').hidden = $('voice-input').hidden = true;
   $('task-goal').textContent = view.goal_text || '';
   $('status').textContent = taskState(view);
   $('status').classList.toggle('error-badge', Boolean(taskError(view)));
@@ -781,7 +850,7 @@ function renderConversation(view) {
   $('reason').hidden = Boolean(error);
   $('task-error-card').hidden = !error;
   $('task-error-card').replaceChildren(...(error ? [errorCard(view)] : []));
-  const cancelMessage = view.cancel_result ? cancellationMessage(view) : stopRequests.get(view.task_id)?.error;
+  const cancelMessage = view.cancel_result ? cancellationMessage(view) : stopRequests.get(stopKey(view))?.error;
   $('cancel-result').hidden = !cancelMessage;
   $('cancel-result').textContent = cancelMessage ? '停止请求：' + cancelMessage : '';
   $('question').textContent = '';
@@ -790,7 +859,8 @@ function renderConversation(view) {
   const results = view.result_summary || [];
   $('execution-detail').hidden = !(view.plan_steps?.length || results.length);
   updateControls();
-  $('plan').replaceChildren(...(view.plan_steps || []).map(step => node('li', step.description)));
+  $('plan').replaceChildren(...(view.plan_steps || []).map(step => node('li', step.description +
+    (view.skipped_steps?.includes(step.step_id) ? '（用户已跳过）' : ''))));
   const expanded = new Set(Array.from($('results').querySelectorAll('details[open]'), item => item.dataset.commandId));
   $('results').replaceChildren();
   if (!results.length) $('results').textContent = '尚无机器人反馈。';
@@ -801,25 +871,27 @@ function renderConversation(view) {
     details.open = expanded.has(cmd.command_id);
     details.append(node('summary', '查看执行依据'), node('small', '指令 ' + cmd.command_id + ' · ' + ((cmd.evidence_ids || [])
       .join('、') || '暂无反馈依据')));
-    const dispatch = {PREPARED: '已准备，尚未下发', DISPATCHING: '正在下发，是否送达待核实', SENT: '已发送，执行结果看回执'};
+    const dispatch = {PREPARED: '已准备，尚未下发', NOT_SENT: '确认未下发', DISPATCHING: '正在下发，是否送达待核实', SENT: '已发送，执行结果看回执'};
     const execution = {SUCCEEDED:'已完成，机器人已报告成功', FAILED:'已结束，机器人已报告失败', RESULT_UNKNOWN:'执行结果未知'};
     const resultLabel = cmd.evidence_conflict ? '执行回执冲突' : outcomes[cmd.outcome] || cmd.outcome;
     const resultDetail = cmd.evidence_conflict ? '收到相互矛盾的回执，无法确认执行结果' :
       execution[cmd.outcome] || dispatch[cmd.dispatch_state] || cmd.dispatch_state;
     item.append(node('strong', resultLabel), node('p', cmd.description),
       node('p', '指令目标：' + cmd.robot_binding_id + ' · ' + resultDetail), details);
+    if (view.skipped_steps?.includes(cmd.step_id)) item.append(node('p', '用户已跳过此动作，原执行回执保留。'));
     $('results').append(item);
   }
 }
 async function openTask(id, focusAnswer = false) {
   blankTask();
+  conversationEntered = true;
   const ticket = selection;
   conversation(true);
   try {
     const view = await api('/tasks/' + encodeURIComponent(id));
     if (ticket === selection) {
       renderConversation(view);
-      if (focusAnswer && view.state === 'NEEDS_CLARIFICATION') $('answer').focus();
+      if (canSendMessage(view)) $('goal').focus();
     }
   } catch (error) {
     if (ticket === selection) $('error').textContent = error.message;
@@ -831,7 +903,10 @@ async function acceptSubmission(view, attempt) {
   pendingWrite = null;
   board.observe(view, true);
   rememberTask(view, true);
-  if (showReply) { $('error').textContent = ''; renderConversation(view); }
+  if (showReply) {
+    if ($('goal').value.trim() === attempt.goal) $('goal').value = '';
+    $('error').textContent = ''; renderConversation(view);
+  }
   if (attempt.stopRequested) await stopTask(view);
   if (page === 'home') board.load();
   loadHistory();
@@ -862,7 +937,7 @@ async function lookupSubmission(attempt = submission) {
 }
 
 async function refreshCurrentTask() {
-  if (!currentTask) { await lookupSubmission(); return; }
+  if (submission?.ticket === selection || !currentTask) { await lookupSubmission(); return; }
   const ticket = selection;
   const id = currentTask.task_id;
   try {
@@ -898,12 +973,8 @@ async function write(path, payload, audioFile, fromBoard = false) {
     $('error').textContent = '请先在设置中应用访问凭据。';
     return;
   }
-  const isSubmission = path === '/tasks' || path === '/tasks/audio';
-  if (isSubmission && currentTask) {
-    if (!canSendMessage(currentTask) || audioFile) return;
-    path = '/tasks/' + encodeURIComponent(currentTask.task_id) + '/messages';
-  }
-  if (isSubmission && !currentTask && submission?.ticket === selection) return;
+  const isSubmission = /^\/tasks\/[^/]+\/messages(?:\/audio)?$/.test(path);
+  if (isSubmission && (!currentTask || !canSendMessage(currentTask) || submission?.ticket === selection)) return;
   const operation = requestAction(path, payload);
   if (operation && (!operation.key || actionAttempts.has(operation.key))) {
     updateControls();
@@ -928,11 +999,9 @@ async function write(path, payload, audioFile, fromBoard = false) {
   writing = true;
   const attempt = isSubmission ? {
     goal: audioFile ? '语音任务：' + audioFile.name : payload.text,
-    request, ticket, stopRequested: false
+    request, ticket, previousTask: currentTask, stopRequested: false
   } : null;
   if (attempt) {
-    $('goal').value = '';
-    $('answer').value = '';
     submission = attempt; renderPending(); renderHistory();
   }
   updateControls();
@@ -967,7 +1036,11 @@ async function write(path, payload, audioFile, fromBoard = false) {
   } catch (error) {
     if (operation) saveActionAttempt(operation.key, error.status >= 400 && error.status < 500 ? 'rejected' : 'unknown', requestErrorReason(error));
     if (epoch === identityEpoch && (ticket === selection || (attempt && attempt.ticket === selection))) {
-      if (attempt) {
+      if (attempt && error.status >= 400 && error.status < 500) {
+        submission = null;
+        pendingWrite = null;
+        renderConversation(attempt.previousTask);
+      } else if (attempt) {
         attempt.unconfirmed = true;
         renderPending();
       }
@@ -990,12 +1063,64 @@ async function write(path, payload, audioFile, fromBoard = false) {
 
 // Cancellation has its own per-task request. A slow submit/answer/approval never
 // swallows it, and responses only update the matching task and current identity.
+async function executionControl(task, operation) {
+  if (!canExecutionAction(task, operation)) return;
+  const epoch = identityEpoch, id = task.task_id, turnKey = stopKey(task);
+  const attemptId = JSON.stringify([actorId, task.turn_id, task.plan_id, task.version, operation]);
+  let attempt = executionAttempts.get(attemptId);
+  if (!attempt) {
+    const active = (task.result_summary || []).findLast(command =>
+      !['PREPARED', 'NOT_SENT'].includes(command.dispatch_state) && !['SUCCEEDED', 'FAILED'].includes(command.outcome));
+    attempt = {key: crypto.randomUUID(), body: {expected_version: task.version,
+      expected_turn_id: task.turn_id, plan_id: task.plan_id,
+      expected_command_id: operation === 'pause' ? active?.command_id || '' : task.pause_command_id || ''}};
+    executionAttempts.set(attemptId, attempt);
+    saveSessionList('deepleap.execution-attempts', executionAttempts);
+  }
+  executionPending.add(turnKey);
+  updateControls(); renderHistory(); board.refreshControls();
+  const observe = view => {
+    if (epoch !== identityEpoch) return;
+    board.observe(view, rows.some(row => row.task_id === id));
+    rememberTask(view, false);
+    if (currentTask?.task_id === id &&
+        (view.turn_seq > currentTask.turn_seq || (view.turn_id === currentTask.turn_id && view.version >= currentTask.version))) {
+      renderConversation(view);
+    }
+  };
+  try {
+    const view = await api('/tasks/' + encodeURIComponent(id) +
+      (operation === 'pause' ? '/stop-current' : '/resume-execution'), {
+      method: 'POST', headers: {'Content-Type': 'application/json', 'Idempotency-Key': attempt.key},
+      body: JSON.stringify(attempt.body)
+    });
+    observe(view);
+    if (epoch === identityEpoch) {
+      $('error').textContent = '';
+      $('notice').textContent = operation === 'pause' ? '后续动作已暂停，请查看当前动作的回执。' : '继续请求已受理。';
+      if (page === 'home') board.load();
+      loadHistory();
+    }
+  } catch (error) {
+    if (epoch === identityEpoch) {
+      const message = requestErrorReason(error) + '。请核对最新状态；重试同一操作会复用原请求编号。';
+      $('notice').textContent = message;
+      if (currentTask?.task_id === id) $('error').textContent = message;
+      try { observe(await api('/tasks/' + encodeURIComponent(id))); } catch { /* Preserve the last confirmed state. */ }
+    }
+  } finally {
+    executionPending.delete(turnKey);
+    if (epoch === identityEpoch) { updateControls(); renderHistory(); board.refreshControls(); }
+  }
+}
+
 async function stopTask(task) {
-  const id = task.task_id;
+  if (task.interaction?.can_stop_execution) return executionControl(task, 'pause');
+  const id = task.task_id, turnKey = stopKey(task);
   if (!id || !canStop(task)) return;
   const request = {key: crypto.randomUUID(), version: task.version ?? null, busy: true};
-  stopRequests.set(id, request);
-  attemptedStops.add(id);
+  stopRequests.set(turnKey, request);
+  attemptedStops.add(turnKey);
   saveSessionList('deepleap.stop-attempts', attemptedStops);
   const epoch = identityEpoch;
   updateControls(); renderHistory();
@@ -1016,7 +1141,7 @@ async function stopTask(task) {
     }
     const view = await api('/tasks/' + encodeURIComponent(id) + '/cancel', {
       method: 'POST', headers: {'Content-Type': 'application/json', 'Idempotency-Key': request.key},
-      body: JSON.stringify({expected_version: request.version})
+      body: JSON.stringify({expected_version: request.version, expected_turn_id: task.turn_id || null})
     });
     if (epoch !== identityEpoch) return;
     request.resolved = true;
@@ -1054,29 +1179,42 @@ async function stopTask(task) {
   }
 }
 
-function archiveCurrentTask() {
-  if (!canContinueTask(currentTask)) return;
-  const previous = $('task-detail').cloneNode(true);
-  previous.removeAttribute('id');
-  previous.classList.add('conversation-turn');
-  previous.dataset.taskId = currentTask.task_id;
-  previous.hidden = false;
-  // Old turns are readable snapshots, not a second set of working controls.
-  previous.querySelectorAll('form, #decisions, #action-result').forEach(element => element.remove());
-  previous.querySelectorAll('[id]').forEach(element => element.removeAttribute('id'));
-  previous.prepend(node('p', '此前任务 · 以下保留提交下一条时的记录', 'previous-task-note'));
-  $('conversation-history').append(previous);
-}
-
-function newTask() {
+async function newTask() {
+  if (creatingConversation) return;
+  if (!credential) {
+    location.hash = 'settings';
+    $('notice').textContent = '请先连接工作台，再新建会话。';
+    return;
+  }
   blankTask();
+  conversationEntered = true;
+  creatingConversation = true;
   pendingWrite = null;
+  const ticket = selection, epoch = identityEpoch;
+  // A failed create can be retried with the same key without making another chat.
+  creationRequest ||= crypto.randomUUID();
   conversation(true);
+  updateControls();
+  try {
+    const view = await api('/conversations', {method: 'POST', headers: {'Idempotency-Key': creationRequest}});
+    if (epoch !== identityEpoch) return;
+    creationRequest = null;
+    if (ticket === selection) { renderConversation(view); renderHistory(); }
+  } catch (error) {
+    if (epoch === identityEpoch && ticket === selection) $('error').textContent =
+      error.message + ' 可再次点击“新任务”查询或建立这次会话。';
+  } finally {
+    if (epoch === identityEpoch) {
+      creatingConversation = false;
+      updateControls();
+      if (ticket === selection && canSendMessage(currentTask)) $('goal').focus();
+    }
+  }
 }
 $('new-task').onclick = $('sidebar-new').onclick = $('followup-new').onclick = newTask;
 $('goal').oninput = updateControls;
 $('refresh-task').onclick = refreshCurrentTask;
-$('compose').onclick = $('dock').onclick = () => conversation(true);
+$('compose').onclick = newTask;
 $('collapse').onclick = () => conversation(false);
 $('refresh-tasks').onclick = () => loadHistory();
 $('more').onclick = () => loadHistory(true);
@@ -1087,7 +1225,7 @@ $('lookup-form').onsubmit = event => {
 };
 $('submit-form').onsubmit = event => {
   event.preventDefault();
-  if ($('goal').value.trim()) write(currentTask ? '/tasks/' + encodeURIComponent(currentTask.task_id) + '/messages' : '/tasks', {
+  if (!$('goal').disabled && !$('send').disabled && currentTask && $('goal').value.trim()) write('/tasks/' + encodeURIComponent(currentTask.task_id) + '/messages', {
     text: $('goal').value.trim()
   });
 };
@@ -1111,10 +1249,13 @@ for (const decision of ['approve', 'reject']) {
     expected_version: currentTask.version
   });
 }
-$('cancel').onclick = () => currentTask ? stopTask(currentTask) : stopSubmission();
+$('cancel').onclick = () => currentTask && stopTask(currentTask);
+$('resume-execution').onclick = () => currentTask && executionControl(currentTask, 'resume');
+$('end-execution').onclick = () => currentTask && stopTask(currentTask);
+$('pause-planning').onclick = () => submission?.ticket === selection ? stopSubmission() : currentTask && stopTask(currentTask);
 $('audio-submit').onclick = () => {
   const file = $('audio').files[0];
-  if (file) write('/tasks/audio', null, file);
+  if (file && currentTask && canSendMessage(currentTask)) write('/tasks/' + encodeURIComponent(currentTask.task_id) + '/messages/audio', null, file);
   else $('error').textContent = '请先选择 WAV 文件。';
 };
 $('record').onclick = async () => {
@@ -1146,7 +1287,7 @@ $('record').onclick = async () => {
     const files = new DataTransfer();
     files.items.add(wav);
     $('audio').files = files.files;
-    await write('/tasks/audio', null, $('audio').files[0]);
+    if (currentTask && canSendMessage(currentTask)) await write('/tasks/' + encodeURIComponent(currentTask.task_id) + '/messages/audio', null, $('audio').files[0]);
   } catch (error) {
     if (ticket === micRequest) $('error').textContent = error.message;
   } finally {
@@ -1161,13 +1302,14 @@ $('record').onclick = async () => {
 document.addEventListener('keydown', event => {
   if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'k') {
     event.preventDefault();
-    conversation($('conversation').hidden);
+    if (conversationEntered) conversation($('conversation').hidden);
+    else newTask();
   } else if (event.key === 'Escape') conversation(false);
 });
 window.addEventListener('hashchange', navigate);
 window.addEventListener('pagehide', stopRecording);
 setInterval(async () => {
-  if (!credential || !currentTask || polling || $('conversation').hidden) return;
+  if (!credential || !currentTask || polling || writing || submission?.ticket === selection || $('conversation').hidden) return;
   const ticket = selection,
     id = currentTask.task_id;
   polling = true;
@@ -1196,9 +1338,8 @@ setInterval(() => {
     if ((page === 'home' || page === 'robots') && !fleetLoading) loadRobot();
   }
 }, 4000);
-// Opening/reloading the app always starts a new conversation, including old
-// bookmarked #tasks URLs. Merely changing views never submits/cancels a task.
-history.replaceState(null, '', '#chat');
+// Only New Task creates a conversation. Navigation never creates a turn.
+if (!location.hash) history.replaceState(null, '', '#home');
 blankTask();
 board.reset();
 renderHistory();
