@@ -181,9 +181,12 @@ class TaskService:
                         "当前没有仍在执行的动作。")
                 await record("execution-paused:" + pause_key, text + "后续步骤已暂停，等待你选择继续或结束本轮任务。")
         elif task.state == "CANCELLED":
-            text = ("本轮规划已暂停，可以继续在这个会话中输入。"
-                    if not task.plan and not task.error else
-                    "本轮后续执行已结束。已发动作的结果以机器人回执为准。")
+            if task.reason_code == "APPROVAL_REJECTED" and not task.error:
+                text = "已拒绝这个计划，可以继续输入。"
+            else:
+                text = ("本轮规划已暂停，可以继续在这个会话中输入。"
+                        if not task.plan and not task.error else
+                        "本轮后续执行已结束。已发动作的结果以机器人回执为准。")
             await record("cancelled", text)
         elif task.state == "CANCEL_REQUESTED" and task.cancel_result:
             result = task.cancel_result
@@ -1094,7 +1097,7 @@ class TaskService:
                 reason = "" if state == "READY" else "AUTHORIZATION_" + check.authorization.upper()
                 records = check.records + (Decision(str(uuid4()), "approval", "approve", self.policy.version, detail=evidence),)
             else:
-                state, reason = "FAILED", "APPROVAL_REJECTED"
+                state, reason = "CANCELLED", "APPROVAL_REJECTED"
         except (PlanError, PreflightBlocked, DependencyUnavailable, PermissionError) as exc:
             failure = exc
             state, reason = "BLOCKED", error_code(exc, "PLAN_INVALID" if isinstance(exc, PlanError) else "INTERNAL_ERROR")

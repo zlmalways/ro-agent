@@ -529,7 +529,6 @@ function resetIdentity() {
   $('robot-status').textContent = '请先设置访问凭据。';
   $('lookup').value = $('notice').textContent = '';
   $('task-goal').textContent = $('task-id').textContent = $('question').textContent = '';
-  $('plan').replaceChildren();
   $('results').replaceChildren();
   conversation(page === 'chat', false);
 }
@@ -753,6 +752,7 @@ function errorCard(view) {
 function taskState(view) {
   const error = taskError(view);
   if (error) return {NOT_SENT:'未执行', FAILED:'执行失败', UNKNOWN:'执行结果未知', CONFLICT:'执行证据冲突', PARTIAL:'部分完成', SUCCEEDED:'后续执行已结束'}[error.execution_status] || '任务发生错误';
+  if (view.state === 'CANCELLED' && view.reason_code === 'APPROVAL_REJECTED') return '已拒绝';
   if (view.state === 'CANCEL_REQUESTED') return view.cancel_result?.status === 'SENT' ? '等待机器人确认停止' : view.cancel_result?.status === 'NOT_SENT' ? '停止请求未发送' : '停止请求结果未确认';
   return ["RESTART_TASK_LOST", "ROBOT_DISABLED"].includes(view.reason_code) ? "任务已结束" : (states[view.state] || view.state);
 }
@@ -781,6 +781,7 @@ function taskReason(view) {
   if (view.reason_code === "RESTART_TASK_LOST") return "重启任务丢失：平台已结束旧任务，不会继续后续步骤。机器人动作结果以回执为准。";
   if (view.result_disputed) return '执行证据存在冲突，需要人工核对。';
   const reasons = {
+    APPROVAL_REJECTED: '已拒绝这个计划，可以继续输入。',
     PLANNER_UNAVAILABLE: '计划生成失败：模型服务暂时不可用。',
     EXECUTION_CAPACITY_BUSY: '机器人正在处理其他任务，排队中。',
     QUEUE_ORDER: '等待前面的任务，排队中。',
@@ -805,7 +806,13 @@ function taskReason(view) {
 }
 
 function renderMessages(view) {
-  const messages = view.messages || [];
+  const messages = [...(view.messages || [])];
+  const planMessageId = (view.turn_id || view.task_id) + ':plan:' + view.plan_id;
+  // Older tasks may have a plan without a persisted conversation message.
+  if (view.plan_id && view.plan_steps?.length && !messages.some(message => message.message_id === planMessageId)) {
+    messages.push({role: 'assistant', content: '执行计划：\n' + view.plan_steps.map((step, index) =>
+      (index + 1) + '. ' + step.description).join('\n')});
+  }
   $('conversation-history').replaceChildren(...messages.map(message => {
     if (message.role === 'assistant') {
       const item = node('div', '', 'conversation-message assistant-message');
@@ -857,10 +864,8 @@ function renderConversation(view) {
   $('answer-form').hidden = true;
   $('decisions').hidden = Boolean(error) || view.state !== 'WAITING_APPROVAL';
   const results = view.result_summary || [];
-  $('execution-detail').hidden = !(view.plan_steps?.length || results.length);
+  $('execution-detail').hidden = !results.length;
   updateControls();
-  $('plan').replaceChildren(...(view.plan_steps || []).map(step => node('li', step.description +
-    (view.skipped_steps?.includes(step.step_id) ? '（用户已跳过）' : ''))));
   const expanded = new Set(Array.from($('results').querySelectorAll('details[open]'), item => item.dataset.commandId));
   $('results').replaceChildren();
   if (!results.length) $('results').textContent = '尚无机器人反馈。';

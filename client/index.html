@@ -66,7 +66,7 @@
             <p id="task-robots" class="hint"></p><p id="reason"></p><div id="task-error-card" hidden></div><p id="cancel-result" class="hint" hidden></p><p id="question"></p>
             <form id="answer-form" hidden><label>澄清回答<input id="answer" required></label><button>提交回答</button></form>
             <div id="decisions" hidden><button id="approve">批准计划</button> <button id="reject" class="quiet">拒绝计划</button></div>
-            <div id="execution-detail" hidden><h3>执行计划</h3><ol id="plan"></ol><h3>机器人执行反馈</h3><div id="results"></div></div>
+            <div id="execution-detail" hidden><h3>机器人执行反馈</h3><div id="results"></div></div>
         <div id="active-composer" class="chat-composer" hidden>
           <p id="composer-message">任务进行中，可以随时停止</p>
           <div class="composer-actions"><small id="stop-hint">停止当前动作，保留后续步骤</small><button id="refresh-task" class="quiet" hidden>刷新任务状态</button><button id="cancel"><span aria-hidden="true">■</span> 停止当前动作</button><button id="resume-execution" type="button" hidden>▶ 继续后续动作</button><button id="end-execution" type="button" class="quiet" hidden>结束本轮任务</button><button id="followup-new" hidden>新任务</button></div>
@@ -86,5 +86,5 @@
     </section>
   </main>
   <p id="task-alert" class="task-notification" role="status" aria-live="polite"></p>
-  <script src="/client/audio.js" defer></script><script src="/client/home.js?v=20261111-execution-pause" defer></script><script src="/client/app.js?v=20261111-execution-pause" defer></script>
+  <script src="/client/audio.js" defer></script><script src="/client/home.js?v=20261111-execution-pause" defer></script><script src="/client/app.js?v=20261112-plan-decisions" defer></script>
 </body></html>
