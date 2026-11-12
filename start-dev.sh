@@ -14,6 +14,26 @@ if [[ $# -gt 0 ]]; then
     fi
     runtime_file="$2"
 fi
+
+log_dir="$project_dir/test-db/logs"
+if ! mkdir -p -- "$log_dir"; then
+    printf '启动失败：无法创建日志目录：%s\n' "$log_dir" >&2
+    exit 1
+fi
+log_file="$log_dir/ro-agent-dev-$(date '+%Y%m%d-%H%M%S')-$$.log"
+if ! ( : >> "$log_file" ); then
+    printf '启动失败：无法打开日志文件：%s\n' "$log_file" >&2
+    exit 1
+fi
+if ! command -v tee >/dev/null 2>&1; then
+    printf '%s\n' '启动失败：找不到 tee，无法同时显示和保存日志。' >&2
+    exit 1
+fi
+# Keep Python's exec startup; tee must survive Ctrl+C to capture shutdown output.
+# This captures emitted output only; it does not change application log levels.
+exec > >(tee -a -i -- "$log_file") 2>&1
+printf '本次启动日志：%s\n' "$log_file"
+
 if [[ ! -f "$runtime_file" ]]; then
     printf 'Missing local runtime configuration: %s\n' "$runtime_file" >&2
     exit 1
