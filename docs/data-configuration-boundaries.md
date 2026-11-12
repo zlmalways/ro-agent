@@ -117,9 +117,9 @@ B12 的 readiness 全部现有字段：`executor`、`skill_server_ready`、`busy
 | C10 | `DEEPLEAP_LLM_PROVIDER` | 当前 gpt/deepseek；不支持或未选定时没有可用规划提供方 |
 | C11 | `GPT_BASE_URL`, `GPT_MODEL`, `GPT_API_KEY`, `GPT_TIMEOUT_S` | GPT 兼容提供方连接；前三者缺失规划不可用，当前 timeout 缺省 30 秒 |
 | C12 | `DEEPSEEK_BASE_URL`, `DEEPSEEK_MODEL`, `DEEPSEEK_API_KEY`, `DEEPSEEK_TIMEOUT_S` | DeepSeek 同上；当前 timeout 缺省 30 秒 |
-| C13 | `VOICE_ASR_PROVIDER` | 当前正式装配仅接 doubao，其他／缺省转写不可用；不切 fake |
-| C14 | `VOICE_ASR_DOUBAO_API_KEY`, `VOICE_ASR_DOUBAO_RESOURCE_ID`, `VOICE_ASR_DOUBAO_STREAM_URL` | ASR 连接秘密、资源及端点；缺失实际调用报 unavailable |
-| C15 | `limits.asr_timeout` | 启用豆包 ASR 时必须显式正数；不是类构造器中的 15 秒默认 |
+| C13 | `voice_asr.provider`、`mode`、`model` | v1 源码从应用 JSON 选择 openai/doubao；缺省或 disabled 不启用 ASR，未知供应商在启动时拒绝 |
+| C14 | `credentials_file`、`voice_asr.resource_id`、`voice_asr.stream_url` | 顶层路径指向私有 JSON 中的 `VOICE_ASR_OPENAI_API_KEY` 或 `VOICE_ASR_DOUBAO_API_KEY`；豆包资源与端点来自应用 JSON，缺必需配置在启动时拒绝 |
+| C15 | `voice_asr.timeout_seconds` | 启用 ASR 时必须显式填写有限正数；旧 `limits.asr_timeout` 和 ASR 环境变量不再生效，见 [配置说明](asr-json-configuration.md)；此改动未部署到正式运行副本 |
 | C16 | `limits.freshness_seconds` | 必要就绪／路点／技能字段证据的新鲜度上限 |
 | C17 | `limits.max_resource_entries` | 每次资料维护的技术条目上限 |
 | C18 | `limits.max_audio_bytes` | 输入音频字节上限 |

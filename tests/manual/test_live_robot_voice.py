@@ -40,13 +40,15 @@ async def test_spoken_front_desk_reaches_robot_and_finishes():
     dsn = os.environ["RO_AGENT_TEST_DSN"]
     target = urlsplit(dsn)
     assert target.hostname == "127.0.0.1" and target.path == "/ro_agent_sim_test" and not target.query
-    provider = os.getenv("VOICE_ASR_PROVIDER", "doubao")
+    configuration = json.loads(Path(os.environ["RO_AGENT_CONFIG_FILE"]).read_text(encoding="utf-8-sig"))
+    asr_settings = configuration["voice_asr"]
+    provider = asr_settings["provider"]
     binding = "mock-fridge-01"
     customer = "local-simulator-test"
     wav = Path(__file__).parent / "fixtures" / "front-desk.wav"
     digest = sha256(b"audio/wav\x00" + wav.read_bytes()).hexdigest()
     assert provider in {"openai", "doubao"}
-    prefix = f"openai:{os.environ['VOICE_ASR_OPENAI_MODEL']}:req_" if provider == "openai" else "doubao:"
+    prefix = f"openai:{asr_settings['model']}:req_" if provider == "openai" else "doubao:"
     db = await asyncpg.connect(dsn)
     try:
         started = await db.fetchval("SELECT clock_timestamp()")

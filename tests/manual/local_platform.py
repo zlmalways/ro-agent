@@ -1,5 +1,6 @@
 """Loopback-only integration deployment for mock-fridge-01. Uses PostgreSQL and the configured providers."""
 import os
+import json
 from pathlib import Path
 import socket
 from tempfile import gettempdir
@@ -23,9 +24,8 @@ def create_platform():
         raise ValueError("set the simulator robot token and test user token")
     if env["RO_AGENT_ROBOT_TOKEN"] == env["RO_AGENT_USER_TOKEN"]:
         raise ValueError("use separate test credentials for the user and robot")
-    env.setdefault("VOICE_ASR_PROVIDER", "doubao")
-    env.setdefault("VOICE_ASR_DOUBAO_RESOURCE_ID", "volc.bigasr.sauc.duration")
-    env.setdefault("VOICE_ASR_DOUBAO_STREAM_URL", "wss://openspeech.bytedance.com/api/v3/sauc/bigmodel_async")
+    config_file = Path(env["RO_AGENT_CONFIG_FILE"])
+    asr_source = json.loads(config_file.read_text(encoding="utf-8-sig"))
     deployment = "local-simulator"
     binding = "mock-fridge-01"
     company = "local-simulator-test"
@@ -37,6 +37,8 @@ def create_platform():
                        str(Path(gettempdir()).resolve() / "ro-agent-local-simulator.lock"),
                        "advisory_key": 723418326},
         "allow_external_calls": True,
+        "credentials_file": asr_source["credentials_file"],
+        "voice_asr": asr_source["voice_asr"],
         "users": [{"customer_id": company, "actor_id": "sim-admin", "roles": ["maintainer", "approver"],
                    "token_env": "RO_AGENT_USER_TOKEN"}],
         "robots": [{"customer_id": company, "binding_id": binding, "wire_robot_id": binding,
@@ -46,7 +48,7 @@ def create_platform():
                    "actions": {company: {"move_to": "allow", "vla_skill": "require_confirmation"}}},
         "limits": {"freshness_seconds": 30, "max_resource_entries": 100, "max_audio_bytes": 2_000_000,
                    "max_frame_bytes": 3_000_000, "max_text_chars": 2000, "max_plan_steps": 12,
-                   "provider_response_bytes": 2_000_000, "scan_interval": 0.2, "asr_timeout": 30,
+                   "provider_response_bytes": 2_000_000, "scan_interval": 0.2,
                    "command_timeout": 30},
     }, environment=env)
     base_lifespan = app.router.lifespan_context

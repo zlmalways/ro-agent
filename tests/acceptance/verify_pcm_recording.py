@@ -7,13 +7,10 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import ctypes as ct
-from ctypes import wintypes as w
 from datetime import datetime, timezone
 from hashlib import sha256
 import json
 import logging
-import os
 from pathlib import Path
 import subprocess
 import sys
@@ -28,6 +25,7 @@ from tests.acceptance.verify_dev_launcher import (  # noqa: E402
     launch, listening, secret, stop_with_ctrl_c, wait_healthy,
 )
 from tests.manual.mock_robot_ws import Simulator, command_session, send_pcm  # noqa: E402
+from tools.dev_runtime import read_external_settings  # noqa: E402
 
 TEST = ROOT / "test-db"
 APP_CONFIG = ROOT / "config/dev.e2e.local.json"
@@ -40,41 +38,6 @@ REPORT = TEST / "wav-recording-verification.json"
 def require(value, message):
     if not value:
         raise RuntimeError(message)
-
-
-def read_asr_credential(target):
-    class Credential(ct.Structure):
-        _fields_ = [
-            ("flags", w.DWORD), ("kind", w.DWORD), ("target", w.LPWSTR), ("comment", w.LPWSTR),
-            ("written", w.FILETIME), ("size", w.DWORD), ("blob", ct.c_void_p), ("persist", w.DWORD),
-            ("count", w.DWORD), ("attrs", ct.c_void_p), ("alias", w.LPWSTR), ("user", w.LPWSTR),
-        ]
-    api = ct.WinDLL("Advapi32", use_last_error=True)
-    entry = ct.POINTER(Credential)()
-    api.CredReadW.argtypes = [w.LPCWSTR, w.DWORD, w.DWORD, ct.POINTER(ct.POINTER(Credential))]
-    api.CredReadW.restype = w.BOOL
-    api.CredFree.argtypes = [ct.c_void_p]
-    if not api.CredReadW(target, 1, 0, ct.byref(entry)):
-        raise RuntimeError("ASR Windows credential is unavailable")
-    try:
-        return ct.string_at(entry.contents.blob, entry.contents.size).decode("utf-16-le").strip()
-    finally:
-        api.CredFree(entry)
-
-
-def load_provider_environment(path, credential):
-    private = json.loads(path.read_text(encoding="utf-8"))
-    selected = private.get("DEEPLEAP_LLM_PROVIDER", "").lower()
-    require(selected in {"relay", "gpt", "deepseek"}, "Planner provider is not configured")
-    prefix = selected.upper()
-    names = ["DEEPLEAP_LLM_PROVIDER", "VOICE_ASR_PROVIDER", "VOICE_ASR_OPENAI_MODEL"]
-    names += [f"{prefix}_{suffix}" for suffix in ("BASE_URL", "API_KEY", "MODEL", "TIMEOUT_S")]
-    environment = {key: private[key] for key in names if key in private}
-    require(environment.get("VOICE_ASR_PROVIDER") == "openai", "This run requires the approved OpenAI ASR")
-    environment["VOICE_ASR_OPENAI_API_KEY"] = read_asr_credential(credential)
-    require(environment.get(f"{prefix}_API_KEY") and environment["VOICE_ASR_OPENAI_API_KEY"],
-            "Provider credentials are incomplete")
-    return environment
 
 
 async def get_json(client, path):
@@ -225,7 +188,10 @@ async def main(args):
     report_path = args.report or REPORT
     require(report_path.resolve().is_relative_to(TEST.resolve()), "Verification report must stay in test-db")
     require(not report_path.exists(), "Report already exists; choose a new --report to preserve earlier evidence")
-    os.environ.update(load_provider_environment(args.provider_env_file, args.asr_credential))
+    if args.credentials_file:
+        base_config["credentials_file"] = str(args.credentials_file.resolve())
+    _, asr_settings = read_external_settings(base_config)
+    require(asr_settings is not None, "Configure voice_asr before running the verification")
     output_root = TEST / ("wav-e2e-" + datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ"))
     output_root.mkdir()
     report = {"status": "running", "test_platform": 18764, "test_database": 55440,
@@ -251,8 +217,8 @@ async def main(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--allow-real-providers", action="store_true", required=True)
-    parser.add_argument("--provider-env-file", type=Path, required=True)
-    parser.add_argument("--asr-credential", required=True)
+    parser.add_argument("--credentials-file", type=Path,
+                        help="optional override for the application's JSON credentials_file")
     parser.add_argument("--wav", type=Path, required=True)
     parser.add_argument("--case", choices=("save", "without-config", "write-failure"),
                         help="run one case instead of the full sequence")

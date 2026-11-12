@@ -69,6 +69,6 @@ python -m tests.manual.mock_robot_ws --url ws://127.0.0.1:18763/api/voice/robot/
 
 历史手动接线 `python -m tests.manual.local_platform` 使用专用数据库 `ro_agent_sim_test`，要求 `RO_AGENT_TEST_DSN` 指向 `127.0.0.1`，并分别设置 `RO_AGENT_ROBOT_TOKEN`、`RO_AGENT_USER_TOKEN`。该入口固定监听本机 `18763`，仅适用于该端口未被占用的独立联调；上述客户端也可显式连接另外启动的测试平台。该手动入口主要用于整段 WAV，不会因为客户端选择 `send-pcm` 而自动打开 PCM 功能。
 
-手动平台通过环境配置选择转写供应商：默认豆包，使用 `VOICE_ASR_DOUBAO_API_KEY`，可覆盖 `VOICE_ASR_DOUBAO_STREAM_URL` 和 `VOICE_ASR_DOUBAO_RESOURCE_ID`；选择官方 OpenAI 时使用 `VOICE_ASR_PROVIDER=openai` 及对应的 `VOICE_ASR_OPENAI_*` 配置。规划模型继续使用平台已有环境配置，密钥只放本机环境，不写进模拟器代码。
+手动平台通过 `RO_AGENT_CONFIG_FILE` 定位应用 JSON，从 `voice_asr` 选择转写供应商、模型、地址与超时，从顶层 `credentials_file` 指向的本机私有 JSON 读取对应 API Key。具体字段见 [ASR JSON 配置](../../docs/asr-json-configuration.md)，旧 ASR 环境变量不再生效。规划模型继续使用平台已有环境配置，密钥不写进模拟器代码。
 
 离线协议回归使用 `python -m pytest -q tests/manual/test_mock_robot_ws.py tests/manual/test_simulator_alignment.py`，只连接临时本机端口，不调用真实模型。`test_live_robot_voice.py` 则须先明确允许真实调用，用 `RO_AGENT_TEST_WS_URL` 指定独立测试平台的 WebSocket 地址，再设置 `RO_AGENT_RUN_LIVE_VOICE=1`，它会上传一次 WAV、查询转写与任务并核对导航指令和模拟成功回执；重新运行会产生新输入。本轮合并未运行这项真实联调，不代表真机能力已验收。

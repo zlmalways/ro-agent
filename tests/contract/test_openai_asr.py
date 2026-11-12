@@ -7,17 +7,16 @@ import httpx
 import pytest
 
 from robot_agent.application.input_service import InputService
+from robot_agent.asr_config import AsrConfig
 from robot_agent.deployment import build_asr
 from robot_agent.domain.models import DependencyUnavailable, PlanError, TrustedContext
 from tests.contract.test_asr import wav_fixture
 
 
 def configured_asr(model="test-transcriber", *, enabled=True, api_key="official-test-key"):
-    return build_asr(
-        {"allow_external_calls": enabled, "limits": {"asr_timeout": 3, "provider_response_bytes": 4096}},
-        {"VOICE_ASR_PROVIDER": "openai", "VOICE_ASR_OPENAI_MODEL": model,
-         "VOICE_ASR_OPENAI_API_KEY": api_key, "RELAY_API_KEY": "unrelated-relay-key"},
-    )
+    settings = None if not enabled else AsrConfig(
+        "openai", api_key, 3, 4096, model=model)
+    return build_asr(settings)
 
 
 @pytest.mark.parametrize("model", ["first-test-model", "second-test-model"])
@@ -45,7 +44,7 @@ async def test_configured_model_and_original_wav_are_sent_to_official_endpoint(m
 
 
 @pytest.mark.parametrize(("args", "error"), [
-    ({"model": "  "}, "ASR_MODEL_UNCONFIGURED"),
+    ({"model": ""}, "ASR_MODEL_UNCONFIGURED"),
     ({"api_key": ""}, "ASR_UNAVAILABLE"),
     ({"enabled": False}, "ASR_UNAVAILABLE"),
 ])

@@ -24,7 +24,7 @@ bash start-dev.sh
 3. 预留测试平台端口。已有平台占用端口时直接报错，不停止已有服务。
 4. 用 `pg_ctl status` 核对配置指定的测试数据库目录。已运行则复用；未运行则通过 `pg_ctl start` 启动并等待，后台数据库脱离平台的控制台。此入口不会执行 `initdb`、创建账号或数据库、清空历史或再次复制正式配置。
 5. 用测试管理员凭据只读核对真实数据库目录、端口及库所有者，再用测试应用账号验证连接。失败就退出，不启动平台。
-6. 将测试应用连接信息和用户/机器人令牌放入当前进程环境；若 `config/dev.local.json` 开启 `allow_external_calls`，再从其中 `llm.credentials_file` 指向的本机 JSON 中只读取所选提供方的模型变量，设置 `RO_AGENT_CONFIG_FILE`，加载当前项目 `src/robot_agent/app.py`。模型密钥只在当前测试平台进程及其子进程环境中存在，不写入仓库或启动输出。
+6. 将测试应用连接信息和用户/机器人令牌放入当前进程环境；在第 2 步已经从应用顶层 `credentials_file` 指向的本机 JSON 读取规划模型和 ASR 凭据并校验。规划模型继续使用选中的模型环境变量，ASR 使用 `voice_asr` 与校验后的配置对象直接装配，不注入环境变量。加载当前项目代码，不把密钥写入仓库或启动输出。
 7. 现有平台启动代码自行检查并执行缺少的数据库迁移、登记机器人绑定、初始化业务组件和后台循环。完成后才提供 HTTP 服务。脚本没有复制业务逻辑。
 
 `local-runtime.json` 中的关键内容：
@@ -40,7 +40,7 @@ bash start-dev.sh
 | `postgresql.admin_password_file` | 测试集群管理员密码文件，仅用于启动前只读核对，不交给平台 |
 | `credentials` | 测试用户、两个机器人令牌文件的位置 |
 
-要让本机测试平台使用真实规划模型，`config/dev.local.json` 需要设置 `allow_external_calls: true`，并配置 `llm.provider` 和 `llm.credentials_file`。凭据文件只需包含对应的 `DEEPLEAP_LLM_PROVIDER`、`<PROVIDER>_BASE_URL`、`<PROVIDER>_MODEL`、`<PROVIDER>_API_KEY` 及可选超时变量；启动器不会读取其中的正式数据库或机器人令牌。
+要让本机测试平台使用真实规划模型，`config/dev.local.json` 需要设置 `allow_external_calls: true`、`llm.provider` 和应用顶层 `credentials_file`。凭据 JSON 包含对应的 `<PROVIDER>_BASE_URL`、`<PROVIDER>_MODEL`、`<PROVIDER>_API_KEY` 及可选超时；供应商选择来自 `llm.provider`。ASR 使用同一密钥文件中的 `VOICE_ASR_OPENAI_API_KEY` 或 `VOICE_ASR_DOUBAO_API_KEY`，普通参数写在 `voice_asr`。详见 [ASR JSON 配置](asr-json-configuration.md)。启动器不会注入文件中的正式数据库或机器人令牌。
 
 密码和令牌不出现在启动命令或进度输出中。数据库日志见配置里的 `log_file`；控制命令日志写入同目录 `pg-control.log`。
 

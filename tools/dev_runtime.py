@@ -59,17 +59,21 @@ def read_secret(value):
     return secret
 
 
-def read_llm_environment(application):
+def read_external_settings(application):
+    sys.path.insert(0, str(ROOT / "src"))
+    from robot_agent.asr_config import load_asr_config, read_credentials
+
     if application.get("allow_external_calls") is not True:
-        return {}
+        return {}, None
     configuration = application.get("llm")
     require(isinstance(configuration, dict), "已启用外部模型调用，但缺少本机 llm 配置。")
     provider = configuration.get("provider", "")
     require(provider in {"gpt", "deepseek", "relay"}, "llm.provider 必须是 gpt、deepseek 或 relay。")
-    credentials_file = Path(configuration.get("credentials_file", ""))
-    require(credentials_file.is_absolute() and credentials_file.is_file(),
-            "llm.credentials_file 不存在或不是绝对路径。")
-    credentials = read_json(credentials_file)
+    try:
+        credentials = read_credentials(application)
+        asr_config = load_asr_config(application, credentials=credentials)
+    except ValueError as exc:
+        raise StartupError(str(exc)) from None
     prefix = provider.upper()
     environment = {"DEEPLEAP_LLM_PROVIDER": provider}
     for suffix in ("BASE_URL", "API_KEY", "MODEL"):
@@ -84,7 +88,7 @@ def read_llm_environment(application):
         require(isinstance(timeout, (int, float, str)) and str(timeout).strip(),
                 f"模型凭据文件中的 {timeout_name} 无效。")
         environment[timeout_name] = str(timeout).strip()
-    return environment
+    return environment, asr_config
 
 
 def read_settings(config_path):
@@ -116,11 +120,12 @@ def read_settings(config_path):
     require(references == set(runtime["credentials"]), "用户/机器人凭据引用与本机配置不一致。")
     require(all(name.startswith("RO_AGENT_TEST_") for name in references), "只允许独立测试凭据环境变量。")
     secrets = {name: read_secret(path) for name, path in runtime["credentials"].items()}
-    llm_environment = read_llm_environment(application)
+    llm_environment, asr_config = read_external_settings(application)
     return {
         "runtime": runtime, "application": application, "application_file": application_file,
         "data": data, "log": log, "pg_ctl": pg_ctl, "secrets": secrets,
         "llm_environment": llm_environment,
+        "asr_config": asr_config,
         "password": read_secret(database["password_file"]),
         "admin_password": read_secret(database["admin_password_file"]),
     }
@@ -231,12 +236,16 @@ async def run(settings):
         sys.path.insert(0, str(ROOT / "src"))
         app_module = importlib.import_module("robot_agent.app")
         require(Path(app_module.__file__).resolve() == ROOT / "src/robot_agent/app.py", "加载的不是当前项目源码。")
+        from robot_agent.deployment import build_app
+        app = build_app(settings["application"], asr_config=settings["asr_config"])
         announce(f"[4/5] 启动当前项目平台，配置：{settings['application_file']}")
+        asr_name = settings["asr_config"].provider if settings["asr_config"] else "disabled"
+        announce(f"ASR JSON 配置已校验，供应商：{asr_name}；不显示密钥。")
         announce("[5/5] 平台将连接数据库、检查表结构并登记机器人；等待 Application startup complete。")
         http = settings["runtime"]["http"]
         announce(f"访问地址：http://{http['host']}:{http['port']}；Ctrl+C 停止平台，测试数据库保持运行。")
         server = uvicorn.Server(uvicorn.Config(
-            "robot_agent.app:create_app", factory=True, host=http["host"], port=http["port"],
+            app, host=http["host"], port=http["port"],
             ws="websockets-sansio", ws_max_size=settings["application"]["limits"]["max_frame_bytes"],
             timeout_graceful_shutdown=15, access_log=False, lifespan="on",
         ))

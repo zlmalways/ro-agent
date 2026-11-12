@@ -20,7 +20,7 @@
 
 在指定主机的独立 Python 3.11+ 虚拟环境安装本仓库：`pip install .`。安装包包含网页与 SQL 迁移，不依赖旧平台代码。创建明确的 JSON 配置，通过 `RO_AGENT_CONFIG_FILE` 指定绝对路径；启动入口为 `uvicorn robot_agent.app:create_app --factory --host 127.0.0.1 --port 8000 --workers 1`。缺配置时只开放不可用状态与页面，不构造 fake LLM／Store／机器人。
 
-配置引用环境变量名字，真实密钥只写部署环境，不写 JSON、Git、页面或模型上下文。数据库用户需要本应用 schema 的迁移和运行权限；自动迁移有编号与校验和，不改写已安装迁移。启动时只新增明确登记的绑定，不覆盖既有权限或解除隔离。
+数据库和身份令牌仍引用环境变量名字。ASR 参数使用应用 JSON 的 `voice_asr`，密钥放在顶层 `credentials_file` 指向的本机私有 JSON；密钥不写入 Git、页面或模型上下文。完整 ASR 配置与迁移见 [ASR JSON 配置](asr-json-configuration.md)。数据库用户需要本应用 schema 的迁移和运行权限；自动迁移有编号与校验和，不改写已安装迁移。启动时只新增明确登记的绑定，不覆盖既有权限或解除隔离。
 
 当前 users/robots/policy 是启动静态业务输入，改文件不会自动更新正在运行的身份／政策对象；机器人初次登记同时写入数据库，已有许可不同会拒绝而非覆盖。没有在线账号密码登录和完整登记／权限管理。此格式只用于当前明确对象的受控初始化／装配，不能作为日常注册和加设备的长期设计。
 
@@ -32,7 +32,7 @@
   "users": [{"customer_id": "<客户>", "actor_id": "<用户>", "roles": ["user"], "token_env": "RO_AGENT_USER_TOKEN"}],
   "robots": [{"customer_id": "<客户>", "binding_id": "<内部绑定>", "wire_robot_id": "<实际机器人ID>", "token_env": "RO_AGENT_ROBOT_TOKEN", "allowed_actions": ["move_to", "vla_skill"]}],
   "policy": {"version": "<已批准政策版本>", "approval_ttl_seconds": null, "actions": {}},
-  "limits": {"freshness_seconds": null, "max_resource_entries": null, "max_audio_bytes": null, "max_frame_bytes": null, "max_text_chars": null, "max_plan_steps": null, "provider_response_bytes": null, "scan_interval": null, "command_timeout": null, "asr_timeout": null}
+  "limits": {"freshness_seconds": null, "max_resource_entries": null, "max_audio_bytes": null, "max_frame_bytes": null, "max_text_chars": null, "max_plan_steps": null, "provider_response_bytes": null, "scan_interval": null, "command_timeout": null}
 }
 ```
 
@@ -50,9 +50,9 @@
 
 沿用旧代码的提供方选择变量 `DEEPLEAP_LLM_PROVIDER=gpt|deepseek|relay` 及相应 `GPT_BASE_URL/GPT_MODEL/GPT_API_KEY` 、`DEEPSEEK_BASE_URL/DEEPSEEK_MODEL/DEEPSEEK_API_KEY` 或 `RELAY_BASE_URL/RELAY_MODEL/RELAY_API_KEY`，模型与 URL 必须显式指定。旧本地代码不能确认实际部署当前选择哪家，因此不猜测默认模型。候选 JSON 始终再做白名单、目录、权限和依赖检查；没有任何模型直接驱动物理动作的旁路。
 
-GPT／DeepSeek 的超时字段为 `GPT_TIMEOUT_S`／`DEEPSEEK_TIMEOUT_S`，缺省 30 秒；relay 使用 `RELAY_TIMEOUT_S`，缺省 240 秒。relay 通过 `/responses` 请求结构化候选计划，API 根地址不得重复包含 `/responses`，禁用系统代理和 HTTP 重定向。启用 ASR 必须显式提供正数 `limits.asr_timeout`；ASR wrapper 另有默认音频大小检查，不应误写成全部参数已经统一。这些默认和正式值的差异见完整清单，不把默认当用户批准的时限。
+GPT／DeepSeek 的超时字段为 `GPT_TIMEOUT_S`／`DEEPSEEK_TIMEOUT_S`，缺省 30 秒；relay 使用 `RELAY_TIMEOUT_S`，缺省 240 秒。relay 通过 `/responses` 请求结构化候选计划，API 根地址不得重复包含 `/responses`，禁用系统代理和 HTTP 重定向。启用 ASR 必须在应用 JSON 中显式提供有限正数 `voice_asr.timeout_seconds`；ASR wrapper 另有默认音频大小检查，不应误写成全部参数已经统一。这些默认和正式值的差异见完整清单，不把默认当用户批准的时限。
 
-旧项目 `docs/code-tour/06-voice.md` 明确生产使用豆包流式 ASR。对应 `VOICE_ASR_PROVIDER=doubao`、`VOICE_ASR_DOUBAO_API_KEY`、`VOICE_ASR_DOUBAO_RESOURCE_ID`、`VOICE_ASR_DOUBAO_STREAM_URL`；当前协议接受 16 kHz、单声道、16 bit PCM WAV。新实现没有 Qwen／fake 回退。外部调用只有在配置 `allow_external_calls=true` 并获得费用、音频外传及凭据使用授权后才启用；本次未做真实调用。
+ASR 由应用 JSON 的 `voice_asr.provider` 选择 `doubao` 或 `openai`，模型、模式、豆包资源及连接地址同样在 `voice_asr` 中填写；相应 API Key 只从 `credentials_file` 所指 JSON 读取。旧 ASR 环境变量不再生效。豆包适配器接受 16 kHz、单声道、16 bit PCM WAV，没有 Qwen／fake 回退。配置示例与原启动脚本的用法见 [ASR JSON 配置](asr-json-configuration.md)。外部调用仍受 `allow_external_calls` 控制；本次配置改动未做真实调用，也未更新正式发布副本。
 
 TTS 类参数和 VoiceService 的唤醒／重复输入参数已列入清单，但正式 deployment.py 没有装配 VoiceService 或 TTS，也没有确定的 TTS 环境字段。不能把设置 ASR 变量等同于机器人语音／播报全链路已启用。
 

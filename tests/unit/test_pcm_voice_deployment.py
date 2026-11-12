@@ -4,6 +4,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from robot_agent.asr_config import load_asr_config
 
 from robot_agent import deployment
 from robot_agent.application.voice_service import VoiceService
@@ -90,23 +91,25 @@ async def test_pcm_assembly_preserves_main_runtime_resources_and_cleanup(monkeyp
         "database": {"dsn_env": "TEST_DSN"},
         "deployment": {"id": "test-deployment", "execution_enabled": False},
         "allow_external_calls": True,
+        "voice_asr": {"provider": "openai", "mode": "file", "model": "test-transcriber",
+                      "timeout_seconds": 3},
         "resources": {"use_reported_waypoints": True},
         "voice_pcm": {"enabled": True, "submit_tasks": True},
         "robots": robots,
         "limits": {"freshness_seconds": 60, "max_resource_entries": 100, "max_audio_bytes": 65536,
                    "max_frame_bytes": 8192, "max_text_chars": 2000, "max_plan_steps": 20,
                    "provider_response_bytes": 65536, "scan_interval": 0.1, "command_timeout": 30,
-                   "asr_timeout": 3},
+                   },
     }
     environment = {
         "TEST_DSN": "postgresql://localhost/unused_test", "first-token": "fixture-first",
-        "second-token": "fixture-second", "VOICE_ASR_PROVIDER": "openai",
-        "VOICE_ASR_OPENAI_MODEL": "test-transcriber", "VOICE_ASR_OPENAI_API_KEY": "fixture-asr",
+        "second-token": "fixture-second",
         "DEEPLEAP_LLM_PROVIDER": "relay", "RELAY_MODEL": "test-planner",
         "RELAY_API_KEY": "fixture-relay", "RELAY_BASE_URL": "https://relay.invalid/v1",
         "VOICE_PCM_SILENCE_MS": "640",
     }
-    app = deployment.build_app(configuration, environment=environment)
+    asr_config = load_asr_config(configuration, credentials={"VOICE_ASR_OPENAI_API_KEY": "fixture-asr"})
+    app = deployment.build_app(configuration, environment=environment, asr_config=asr_config)
 
     async def exercise():
         async with app.router.lifespan_context(app):
