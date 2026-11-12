@@ -20,7 +20,8 @@ class Preflight:
         self.catalog = catalog
         self.policy = policy
 
-    async def check(self, context, candidate, snapshot, phase="admission", approvals=()):
+    async def check(self, context, candidate, snapshot, phase="admission", approvals=(),
+                    require_fresh_approval=True):
         if snapshot.customer_id != context.customer_id:
             raise PlanError("snapshot customer mismatch")
         plan = candidate if isinstance(candidate, Plan) else None
@@ -49,7 +50,7 @@ class Preflight:
         if result == "require_confirmation" and plan and any(approval_covers(
                 evidence, customer_id=context.customer_id, plan_id=plan.plan_id, revision=plan.revision,
                 scope=tuple(step.step_id for step in plan.steps), policy_version=getattr(self.policy, "version", ""),
-                now=datetime.now(timezone.utc)) for evidence in approvals):
+                now=datetime.now(timezone.utc), require_fresh=require_fresh_approval) for evidence in approvals):
             result = "allow"
         records = (
             Decision(str(uuid4()), "validation", "valid", "serial-grounding:v1", (snapshot.snapshot_id,)),
@@ -59,8 +60,9 @@ class Preflight:
         return CheckResult(validated, result, records)
 
 
-def approval_covers(evidence, *, customer_id, plan_id, revision, scope, policy_version, now):
+def approval_covers(evidence, *, customer_id, plan_id, revision, scope, policy_version, now,
+                    require_fresh=True):
     return (evidence["customer_id"] == customer_id and evidence["plan_id"] == plan_id
             and evidence["plan_revision"] == revision and set(scope).issubset(evidence["scope"])
             and evidence["policy_version"] == policy_version and evidence["revoked_at"] is None
-            and evidence["issued_at"] <= now < evidence["expires_at"])
+            and (not require_fresh or evidence["issued_at"] <= now < evidence["expires_at"]))

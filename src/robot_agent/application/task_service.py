@@ -30,6 +30,11 @@ def step_description(action, args, labels):
     return "调用技能：" + labels.get(skill_id, skill_id)
 
 
+def plan_has_started(task):
+    """Whether any action in this plan has been attempted outside PREPARED/NOT_SENT."""
+    return any(command.dispatch_state not in {"PREPARED", "NOT_SENT"} for command in task.commands)
+
+
 def task_view(task, allocation_robot_binding_id=None):
     conversation_id = task.conversation_id or task.task_id
     return TaskView(conversation_id, task.version, task.state, task.reason_code,
@@ -633,7 +638,10 @@ class TaskService:
         snapshot = await self.resources.snapshot(context, task.snapshot.robot_binding_id)
         if snapshot.readiness.get("busy") is not False:
             raise PreflightBlocked("ROBOT_STATE_UNKNOWN")
-        check = await self.preflight.check(context, task.plan, snapshot, "dispatch", approvals)
+        check = await self.preflight.check(
+            context, task.plan, snapshot, "dispatch", approvals,
+            require_fresh_approval=not plan_has_started(task),
+        )
         if check.authorization != "allow":
             raise PreflightBlocked("AUTHORIZATION_" + check.authorization.upper())
         async with self.store.system_unit_of_work() as tx:
@@ -837,7 +845,10 @@ class TaskService:
             approvals = await tx.approvals(task)
         try:
             snapshot = await self.resources.snapshot(context, task.snapshot.robot_binding_id)
-            check = await self.preflight.check(context, task.plan, snapshot, "dispatch", approvals)
+            check = await self.preflight.check(
+                context, task.plan, snapshot, "dispatch", approvals,
+                require_fresh_approval=not plan_has_started(task),
+            )
         except (PlanError, PreflightBlocked, DependencyUnavailable, PermissionError) as exc:
             await self._block_current(task, exc)
             return
@@ -895,7 +906,10 @@ class TaskService:
             approvals = await tx.approvals(task)
         try:
             snapshot = await self.resources.snapshot(context, task.snapshot.robot_binding_id)
-            check = await self.preflight.check(context, task.plan, snapshot, "dispatch", approvals)
+            check = await self.preflight.check(
+                context, task.plan, snapshot, "dispatch", approvals,
+                require_fresh_approval=not plan_has_started(task),
+            )
         except (PlanError, PreflightBlocked, DependencyUnavailable, PermissionError) as exc:
             await self._block_current(task, exc)
             return
@@ -1240,7 +1254,10 @@ class TaskService:
         context = TrustedContext(task.customer_id, task.actor_kind, task.actor_id)
         try:
             snapshot = await self.resources.snapshot(context, command.robot_binding_id)
-            check = await self.preflight.check(context, task.plan, snapshot, "write", approvals)
+            check = await self.preflight.check(
+                context, task.plan, snapshot, "write", approvals,
+                require_fresh_approval=not plan_has_started(task),
+            )
         except (PlanError, PreflightBlocked, DependencyUnavailable, PermissionError) as exc:
             return denied(exc)
         if check.authorization != "allow":
@@ -1264,7 +1281,8 @@ class TaskService:
             if check.records[-1].detail["base_result"] == "require_confirmation" and not any(approval_covers(
                     evidence, customer_id=task.customer_id, plan_id=task.plan.plan_id, revision=task.plan.revision,
                     scope=tuple(step.step_id for step in task.plan.steps), policy_version=self.policy.version,
-                    now=datetime.now(timezone.utc)) for evidence in latest):
+                    now=datetime.now(timezone.utc), require_fresh=not plan_has_started(current))
+                    for evidence in latest):
                 return denied("AUTHORIZATION_REQUIRED")
             if check.records[-1].rule_or_policy_version != self.policy.version:
                 return denied("APPROVAL_CHANGED")
