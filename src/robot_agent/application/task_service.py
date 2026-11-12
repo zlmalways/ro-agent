@@ -500,8 +500,8 @@ class TaskService:
                                   clarification_id=str(uuid4()))
                 assistant_message = ("clarify", candidate.question)
             elif candidate.outcome == "unsupported":
-                changed = replace(task, state="FAILED", reason_code="UNSUPPORTED")
-                assistant_message = ("unsupported", candidate.reason or "当前能力无法完成这个任务。")
+                changed = replace(task, state="REPLIED", reason_code="", clarification="", clarification_id="")
+                assistant_message = ("reply", candidate.reason or "当前能力无法完成这个任务。")
             else:
                 check = await self.preflight.check(context, candidate, snapshot, "planning")
                 state = {"allow": "READY", "deny": "FAILED", "require_confirmation": "WAITING_APPROVAL",
