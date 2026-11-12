@@ -492,7 +492,10 @@ class TaskService:
                 candidate = await self.planner.plan(task.goal_text, list(task.answers), snapshot)
             if self.max_plan_steps is not None and len(candidate.steps) > self.max_plan_steps:
                 raise PlanError("PLAN_LIMIT_EXCEEDED")
-            if candidate.outcome == "clarify":
+            if candidate.outcome == "reply":
+                changed = replace(task, state="REPLIED", reason_code="", clarification="", clarification_id="")
+                assistant_message = ("reply", candidate.text)
+            elif candidate.outcome == "clarify":
                 changed = replace(task, state="NEEDS_CLARIFICATION", clarification=candidate.question,
                                   clarification_id=str(uuid4()))
                 assistant_message = ("clarify", candidate.question)

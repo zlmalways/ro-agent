@@ -12,6 +12,10 @@ def fact_message(view):
         return "机器人执行结果存在冲突，请在网页核对。"
     if view.error:
         return view.error["message"] + "原任务已停止推进，请在网页查看指令执行结果。"
+    if view.state == "REPLIED":
+        return next((message["content"] for message in reversed(view.messages)
+                     if message.get("turn_id") == view.turn_id and message.get("role") == "assistant"
+                     and message.get("message_kind") == "reply"), "本轮回复已保存，请在网页查看。")
     if view.state == "NEEDS_CLARIFICATION":
         return view.clarification + "请在网页回答这个问题。"
     if view.state == "WAITING_APPROVAL":
@@ -37,6 +41,8 @@ def voice_frames(*, robot_id, transcript, view=None, error=None):
     question = bool(view and view.state == "NEEDS_CLARIFICATION")
     text = ("语音任务处理失败：" + error) if error else (
         view.clarification if question else "任务已受理，等待机器人执行。")
+    if not error and view and view.state == "REPLIED":
+        text = fact_message(view)
     frames = [{"type": "state", "state": "thinking"}, {"type": "meta", "transcript": transcript, "awake": True},
               {"type": "done", "text": text, "reply": text, "transcript": transcript, "robot_id": robot_id,
                "is_question": question, "expects_reply": question, "play_secs": 0}]

@@ -7,12 +7,15 @@ from robot_agent.domain.models import CandidatePlan, DependencyUnavailable, Plan
 
 
 PLANNING_RULES = (
-    "你是机器人任务会话中的规划代理。请根据完整会话历史和当前机器人资料理解用户最新要求。"
-    "你只能返回一个 JSON 对象，不要输出 Markdown、解释文字、工具调用或视觉内容。"
+    "你是机器人任务会话中的助手，可以自然对话，也可以规划机器人任务。请根据完整会话历史和当前机器人资料理解用户最新要求。"
+    "你只能返回一个 JSON 对象，自然语言写在对应字段里，不要在 JSON 外输出文字、工具调用或视觉内容。"
+    "问候、普通咨询、解释和无需机器人动作的交流返回 outcome=reply、text；text 是直接给用户的自然语言回复，不能为空。"
+    "不要把普通问候或咨询当成缺少任务信息的澄清，不要为普通回复生成动作或声称机器人已经执行。"
     "需要执行时返回 outcome=plan 和 steps；步骤必须按顺序执行，第一步 depends_on 为空，后续步骤只依赖前一步。"
     "move_to 的 args 必须是 {location}，vla_skill 的 args 必须是 {skill_id}，只能使用资料中出现的地点和技能标识。"
-    "信息不足或需要用户选择时返回 outcome=clarify、question、required_slots，不能返回步骤。"
+    "只有用户要求执行机器人任务，但必要信息不足或需要用户选择时，才返回 outcome=clarify、question、required_slots，不能返回步骤。"
     "能力不支持时返回 outcome=unsupported、reason，不能返回步骤。"
+    "所有结果包含 outcome、text、steps、question、required_slots、reason。reply 的 steps、required_slots 为空数组，question、reason 为空字符串；其他结果的 text 为空字符串。"
     "不要生成 customer_id、approval、source_refs、validation、工具调用或执行结果字段。"
 )
 
@@ -25,7 +28,8 @@ def _object_schema(**properties):
 _STRING = {"type": "string"}
 _STRINGS = {"type": "array", "items": _STRING}
 _PLAN_SCHEMA = _object_schema(
-    outcome={"type": "string", "enum": ["plan", "clarify", "unsupported"]},
+    outcome={"type": "string", "enum": ["plan", "clarify", "unsupported", "reply"]},
+    text=_STRING,
     steps={"type": "array", "items": _object_schema(
         step_id=_STRING,
         action={"type": "string", "enum": ["move_to", "vla_skill"]},

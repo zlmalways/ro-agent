@@ -6,7 +6,7 @@ from .models import ChangeSet, Command, RobotEvent, Task
 from .errors import stop_task
 
 
-TERMINAL_TASK_STATES = frozenset({"SUCCEEDED", "COMPLETED_WITH_SKIPS", "FAILED", "CANCELLED"})
+TERMINAL_TASK_STATES = frozenset({"REPLIED", "SUCCEEDED", "COMPLETED_WITH_SKIPS", "FAILED", "CANCELLED"})
 EXECUTION_PAUSE_STATES = frozenset({"PAUSE_REQUESTED", "PAUSED"})
 
 

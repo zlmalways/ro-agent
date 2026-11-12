@@ -9,6 +9,7 @@ const pages = {
 };
 const states = {
   IDLE: '新会话',
+  REPLIED: '已回复',
   RECEIVED: '正在处理',
   RECEIVING: '正在提交',
   PLANNING: '正在生成计划',
@@ -54,7 +55,7 @@ let fleetSelection = null, fleetLoading = false, fleetExpiry = null;
 let fleetView = null; // Last complete list/detail read; pending reads never partly replace it.
 let returnPage = 'home';
 const stopRequests = new Map();
-const endedStates = new Set(['SUCCEEDED', 'COMPLETED_WITH_SKIPS', 'FAILED', 'CANCELLED']);
+const endedStates = new Set(['REPLIED', 'SUCCEEDED', 'COMPLETED_WITH_SKIPS', 'FAILED', 'CANCELLED']);
 const executionPending = new Set();
 const executionAttempts = new Map(readSessionList('deepleap.execution-attempts').filter(item => Array.isArray(item) && item.length === 2));
 const errorDetailsOpen = new Set();
@@ -846,7 +847,7 @@ function renderConversation(view) {
   $('active-composer').hidden = true;
   $('task-reference').hidden = false;
   $('sent-status').textContent = '已提交';
-  $('task-detail').hidden = view.state === 'IDLE';
+  $('task-detail').hidden = view.state === 'IDLE' || (view.state === 'REPLIED' && !taskError(view));
   $('task-goal').parentElement.hidden = true;
   $('task-goal').textContent = view.goal_text || '';
   $('status').textContent = taskState(view);

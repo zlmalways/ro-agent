@@ -67,20 +67,21 @@ class CandidatePlan:
     question: str = ""
     required_slots: tuple[str, ...] = ()
     reason: str = ""
+    text: str = ""
 
     @classmethod
     def from_dict(cls, value: dict) -> "CandidatePlan":
-        allowed = {"outcome", "steps", "question", "required_slots", "reason"}
+        allowed = {"outcome", "steps", "question", "required_slots", "reason", "text"}
         if not isinstance(value, dict) or set(value) - allowed:
             raise PlanError("invalid candidate fields")
         outcome = value.get("outcome")
-        if outcome not in {"plan", "clarify", "unsupported"}:
+        if outcome not in {"plan", "clarify", "unsupported", "reply"}:
             raise PlanError("invalid candidate outcome")
         raw_steps = value.get("steps", [])
         if not isinstance(raw_steps, list):
             raise PlanError("invalid steps")
         if outcome != "plan" and raw_steps:
-            raise PlanError("clarify/unsupported cannot contain steps")
+            raise PlanError("non-plan outcomes cannot contain steps")
         if outcome == "plan" and not raw_steps:
             raise PlanError("plan requires steps")
         steps = []
@@ -100,7 +101,17 @@ class CandidatePlan:
         slots = value.get("required_slots", [])
         if not isinstance(slots, list) or any(not isinstance(slot, str) for slot in slots):
             raise PlanError("invalid required slots")
-        return cls(outcome, tuple(steps), question, tuple(slots), str(value.get("reason", "")))
+        text = value.get("text", "")
+        if not isinstance(text, str):
+            raise PlanError("invalid reply text")
+        if outcome == "reply":
+            if not text.strip():
+                raise PlanError("reply requires text")
+            if question or slots or value.get("reason", ""):
+                raise PlanError("reply cannot contain clarification or unsupported fields")
+        elif text:
+            raise PlanError("text is only allowed for reply")
+        return cls(outcome, tuple(steps), question, tuple(slots), str(value.get("reason", "")), text)
 
 
 @dataclass(frozen=True)

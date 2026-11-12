@@ -139,7 +139,7 @@ class VoiceService:
 
     async def on_result(self, customer_id, binding_id, view):
         session = self.sessions.get((customer_id, binding_id))
-        if session is None or view.state not in {"SUCCEEDED", "COMPLETED_WITH_SKIPS", "FAILED", "CANCELLED", "BLOCKED"}:
+        if session is None or view.state not in {"REPLIED", "SUCCEEDED", "COMPLETED_WITH_SKIPS", "FAILED", "CANCELLED", "BLOCKED"}:
             return
         context = TrustedContext(customer_id, "robot", binding_id)
         try:
