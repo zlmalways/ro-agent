@@ -1,6 +1,8 @@
 # 语音链路计时
 
-每句话记录关键时间，以 `TIMING ` 开头的单行 JSON 写到标准错误；通过 `start-dev.sh` 启动时，由现有 `tee` 保存到本次 `test-db/logs/ro-agent-dev-*.log`。启动装配只打开 `robot_agent.timing` 日志通道，不改变其他日志等级。修改后需要重启平台才能生效。
+每句话记录关键时间，以 `TIMING ` 开头的单行 JSON 写到标准错误；通过 `start-dev.sh` 启动时，由现有 `tee` 保存到本次 `test-db/logs/TEST-ro-agent-*.log`。启动装配统一打开 `robot_agent` 业务日志的 INFO 及以上级别，不改变 Uvicorn 和第三方库的日志配置；计时日志保留原有格式且只输出一次。修改后需要重启平台才能生效。
+
+WAV 保存成功、语音唤醒结果和正常 WebSocket 断开保留 INFO；异常断开用 WARNING，协议、鉴权及内部错误用 ERROR。断开记录包含机器人、绑定、连接代次、通道、关闭码和已知原因；底层未提供的原因留空。连接建立沿用 Uvicorn 日志，业务代码不再重复记录；重复的 PCM 分段摘要和连接清理过程改为 DEBUG，默认不输出。
 
 ## 时间口径
 

@@ -5,6 +5,7 @@ import io
 import wave
 
 from robot_agent.domain.models import DependencyUnavailable
+from robot_agent.protocol.voice_schema import input_error_frame, task_frame
 
 
 def fact_message(view):
@@ -38,17 +39,12 @@ def fact_message(view):
     return "任务已受理，等待机器人执行。"
 
 def voice_frames(*, robot_id, transcript, view=None, error=None):
-    question = bool(view and view.state == "NEEDS_CLARIFICATION")
-    text = ("语音任务处理失败：" + error) if error else (
-        view.clarification if question else "任务已受理，等待机器人执行。")
-    if not error and view and view.state == "REPLIED":
-        text = fact_message(view)
-    frames = [{"type": "state", "state": "thinking"}, {"type": "meta", "transcript": transcript, "awake": True},
-              {"type": "done", "text": text, "reply": text, "transcript": transcript, "robot_id": robot_id,
-               "is_question": question, "expects_reply": question, "play_secs": 0}]
+    frames = [{"type": "state", "state": "thinking"},
+              {"type": "meta", "transcript": transcript, "awake": True}]
     if error:
-        frames.append({"type": "state", "state": "error", "message": error})
-    frames.append({"type": "state", "state": "idle"})
+        frames.append(input_error_frame(error))
+    elif view is not None:
+        frames.append(task_frame(view, robot_id=robot_id, transcript=transcript))
     return frames
 
 
@@ -58,20 +54,19 @@ class VoiceOutput:
 
     async def render(self, *, robot_id, transcript, view=None, error=None):
         frames = voice_frames(robot_id=robot_id, transcript=transcript, view=view, error=error)
-        if view and not error:
-            text = fact_message(view)
-            frames[2].update(text=text, reply=text, expects_reply=False)
-        if error:
+        # Missing TTS is the supported text-only deployment, not a voice failure.
+        # Admission and intermediate states must never generate a reply-ending done.
+        if error or view is None or view.state != "REPLIED" or self.tts is None:
             return frames
+        reply = frames[-1]
         try:
-            if self.tts is None:
-                raise DependencyUnavailable("TTS_UNAVAILABLE")
-            audio = await self.tts.synthesize(frames[2]["text"])
+            audio = await self.tts.synthesize(reply["text"])
             with wave.open(io.BytesIO(audio), "rb") as wav:
                 seconds = wav.getnframes() / wav.getframerate()
-            frames[2]["play_secs"] = seconds
-            frames.insert(2, {"type": "audio", "wav_b64": base64.b64encode(audio).decode(), "content_type": "audio/wav",
-                              "idx": 0, "played_chars": len(frames[2]["text"])})
+            reply.update(play_secs=seconds, playback="audio")
+            frames.insert(-1, {"type": "audio", "wav_b64": base64.b64encode(audio).decode(),
+                               "content_type": "audio/wav", "task_id": reply["task_id"],
+                               "turn_id": reply["turn_id"], "idx": 0, "played_chars": len(reply["text"])})
         except (DependencyUnavailable, wave.Error, EOFError):
-            frames.insert(-1, {"type": "state", "state": "error", "message": "TTS_UNAVAILABLE"})
+            reply["playback_error"] = "TTS_UNAVAILABLE"
         return frames

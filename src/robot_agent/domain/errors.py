@@ -14,6 +14,17 @@ MESSAGES = {
     "CONNECTION_CHANGED": "机器人连接已变化。",
     "CANDIDATE_CUSTOMER_MISMATCH": "机器人归属校验失败。",
     "PLANNER_UNAVAILABLE": "规划服务暂时不可用。",
+    "PLANNER_CONFIG_MISSING": "模型配置不完整，请检查接口地址、模型名称和凭据。",
+    "PLANNER_AUTH_FAILED": "模型接口拒绝了访问凭据或模型访问权限，请检查配置。",
+    "PLANNER_TIMEOUT": "模型接口请求超时，本轮已结束。",
+    "PLANNER_CONNECTION_FAILED": "无法正常连接模型接口，本轮已结束。",
+    "PLANNER_RATE_LIMITED": "模型接口限流，本轮已结束。",
+    "PLANNER_INVALID_RESPONSE": "模型接口没有返回可读取的模型文本，请检查接口服务。",
+    "PLANNER_HISTORY_UNAVAILABLE": "读取会话历史失败，本轮未能继续生成。",
+    "PLANNER_EMPTY_CONTEXT": "缺少有效会话内容，无法生成计划。",
+    "PLANNER_AUDIT_UNAVAILABLE": "模型调用记录无法关联本轮任务，已停止调用。",
+    "PLANNER_REPAIR_UNAVAILABLE": "当前规划接口不支持携带校验反馈，请检查平台配置。",
+    "PLANNER_REPAIR_FAILED": "模型输出在自动纠正一次后仍未通过检查，本轮已结束。",
     "PLANNER_PROVIDER_REJECTED": "规划服务拒绝了本次请求。",
     "PLANNER_RESPONSE_TOO_LARGE": "规划服务返回内容超过限制。",
     "PLANNER_INVALID_OUTPUT": "规划服务返回的计划格式不正确。",
@@ -23,6 +34,8 @@ MESSAGES = {
     "PLANNING_INTERRUPTED": "本次规划已中断。",
     "CAPABILITY_UNKNOWN": "机器人的能力信息缺失或不可用。",
     "ACTION_UNSUPPORTED": "机器人不支持计划中的动作。",
+    "ACTION_NOT_ALLOWED": "平台配置未允许计划中的动作。",
+    "ACTION_GROUNDING_UNAVAILABLE": "平台未配置该动作的参数与资源校验规则。",
     "WAYPOINT_UNVERIFIED": "计划中的地点缺失、已过期或未得到机器人确认。",
     "SKILL_UNVERIFIED": "计划中的技能缺失、已过期或未得到机器人确认。",
     "READINESS_UNKNOWN": "机器人所需的就绪状态缺失、未就绪或已过期。",
@@ -57,9 +70,11 @@ MESSAGES = {
     "EVIDENCE_CONFLICT": "机器人对同一条指令报告了相互矛盾的结果。",
     "UNTRACKED_EXECUTION": "机器人正在执行无法关联到当前任务的指令。",
     "RESTART_TASK_LOST": "服务重启，原任务已结束。",
+    "COMMAND_CONNECTION_LOST": "机器人动作连接中断或重新连接，原任务已结束，不再续做；已发动作是否停止以机器人回报为准。",
     "ROBOT_DISABLED": "机器人已停用，原任务已结束。",
     "INTERNAL_ERROR": "处理任务时发生异常，原任务已停止推进。",
     "PERSISTENCE_UNCONFIRMED": "任务记录未能确认保存，请查询原请求的受理结果。",
+    "DATABASE_UNAVAILABLE": "平台数据库不可用，请稍后重试或重启平台。",
 }
 
 ALIASES = {
@@ -81,6 +96,14 @@ def error_code(reason, fallback="INTERNAL_ERROR"):
 
 
 def error_source(code):
+    if code in {"PLANNER_CONFIG_MISSING", "PLANNER_AUTH_FAILED", "PLANNER_REPAIR_UNAVAILABLE",
+                "ACTION_NOT_ALLOWED", "ACTION_GROUNDING_UNAVAILABLE"}:
+        return "configuration"
+    if code in {"PLANNER_UNAVAILABLE", "PLANNER_TIMEOUT", "PLANNER_CONNECTION_FAILED", "PLANNER_RATE_LIMITED",
+                "PLANNER_INVALID_RESPONSE", "PLANNER_PROVIDER_REJECTED", "PLANNER_RESPONSE_TOO_LARGE"}:
+        return "planner_call"
+    if code in {"PLANNER_HISTORY_UNAVAILABLE", "PLANNER_EMPTY_CONTEXT", "PLANNER_AUDIT_UNAVAILABLE"}:
+        return "storage"
     if code in {"NO_ONLINE_ROBOT", "MULTI_ROBOT_SCHEDULING_NOT_IMPLEMENTED", "ROBOT_STATE_UNKNOWN",
                 "CONNECTION_CHANGED", "CANDIDATE_CUSTOMER_MISMATCH", "ALLOCATION_LOST"}:
         return "scheduling"
@@ -90,9 +113,9 @@ def error_source(code):
         return "planning"
     if code in {"ACTION_FAILED", "RESULT_UNKNOWN", "COMMAND_TIMEOUT", "EVIDENCE_CONFLICT", "UNTRACKED_EXECUTION"}:
         return "execution"
-    if code.startswith(("SEND_", "CANCEL_")) or code == "ROBOT_DISCONNECTED":
+    if code.startswith(("SEND_", "CANCEL_")) or code in {"ROBOT_DISCONNECTED", "COMMAND_CONNECTION_LOST"}:
         return "transport"
-    if code in {"OWNERSHIP_UNAVAILABLE", "RESTART_TASK_LOST", "ROBOT_DISABLED", "INTERNAL_ERROR", "PERSISTENCE_UNCONFIRMED"}:
+    if code in {"OWNERSHIP_UNAVAILABLE", "RESTART_TASK_LOST", "ROBOT_DISABLED", "INTERNAL_ERROR", "PERSISTENCE_UNCONFIRMED", "DATABASE_UNAVAILABLE"}:
         return "runtime"
     return "resources"
 
@@ -102,6 +125,7 @@ def make_error(reason, *, source="", phase="", command=None, fallback="INTERNAL_
     source = getattr(reason, "source", "") or source or error_source(code)
     phase = getattr(reason, "phase", "") or phase or {
         "scheduling": "scheduling", "planning": "planning", "resources": "dispatch",
+        "configuration": "planning", "planner_call": "planning", "storage": "persistence",
         "authorization": "approval", "transport": "write", "execution": "feedback", "runtime": "runtime",
     }.get(source, "runtime")
     result = {"error_id": str(uuid4()), "code": code, "source": source, "message": MESSAGES[code],

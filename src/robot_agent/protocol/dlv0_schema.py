@@ -20,7 +20,8 @@ def ready_frame(robot_id, *, command_channel=False):
 
 
 def command_frame(command):
-    return {"type": "command", "skill": command.wire_skill, "args": dict(command.wire_args), "cmd_id": command.command_id}
+    return {"type": "command", "skill": command.wire_skill, "args": dict(command.wire_args),
+            "cmd_id": command.command_id, "plan_id": command.plan_id}
 
 
 def cancel_frame(command_id):

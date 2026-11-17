@@ -1,9 +1,14 @@
 """Normalize provisioned robot voice input; task decisions stay in TaskService."""
 
 import asyncio
+import logging
 from uuid import uuid4
 
 from robot_agent.domain.models import ConflictError, DependencyUnavailable, NotFoundError, PlanError, TrustedContext
+from robot_agent.protocol.voice_schema import input_error_frame, task_frame, turn_finished
+
+
+log = logging.getLogger(__name__)
 
 
 class VoiceService:
@@ -14,7 +19,7 @@ class VoiceService:
         self.allow_woken_audio = allow_woken_audio
         self.max_audio_bytes = max_audio_bytes
         self.duplicate_policy = duplicate_policy
-        # Explicit deployment opt-in for the authorised PCM test; never inferred from client hints.
+        # Deployment decides whether PCM needs platform wake evaluation; never a client flag.
         self.allow_unwoken_pcm = allow_unwoken_pcm
         self.wake_evaluation = wake_evaluation
         self.submit_woken_pcm = submit_woken_pcm
@@ -30,7 +35,7 @@ class VoiceService:
                 result = await self.wake_evaluation.evaluate_audio(context, audio, request_key or str(uuid4()))
             except (DependencyUnavailable, PlanError, ConflictError) as exc:
                 result = {"type": "state", "state": "error", "message": str(exc)}
-            return [{"type": "state", "state": "thinking"}, result, {"type": "state", "state": "idle"}]
+            return [{"type": "state", "state": "thinking"}, result]
         error, view = None, None
         if not self.allow_woken_audio or woke is not True:
             error = "VOICE_NOT_AWAKE"
@@ -50,12 +55,25 @@ class VoiceService:
 
     def register(self, binding, send):
         key = (binding["customer_id"], binding["binding_id"])
-        session = {"binding": binding, "send": send, "lock": asyncio.Lock(), "pcm": bytearray(), "pcm_admissions": {}}
+        previous = self.sessions.get(key)
+        if previous is not None:
+            self.unregister(previous)
+        session = {"binding": binding, "send": send, "lock": asyncio.Lock(), "pcm": bytearray(),
+                   "pcm_admissions": {}, "task_notifications": {}}
         self.sessions[key] = session
         return session
 
+    def reset_pcm_activity(self, session):
+        """Discard unfinished utterance eligibility at a PCM capture boundary."""
+        binding = session["binding"]
+        if self.sessions.get((binding["customer_id"], binding["binding_id"])) is not session:
+            raise PlanError("VOICE_SESSION_REPLACED")
+        session["pcm_admissions"].clear()
+
     def unregister(self, session):
         session["pcm_admissions"].clear()
+        for notification in session["task_notifications"].values():
+            notification.cancel()
         key = (session["binding"]["customer_id"], session["binding"]["binding_id"])
         if self.sessions.get(key) is session:
             del self.sessions[key]
@@ -74,13 +92,14 @@ class VoiceService:
             admission=admissions.get(activity.segment_id),
         )
 
-    async def deliver(self, session, audio, *, woke):
+    async def deliver(self, session, audio, *, woke, capture_id=None):
         binding = session["binding"]
         if self.sessions.get((binding["customer_id"], binding["binding_id"])) is not session:
             return
         context = TrustedContext(binding["customer_id"], "robot", binding["binding_id"])
         async with session["lock"]:
-            await session["send"]({"type": "state", "state": "thinking"})
+            await session["send"]({"type": "state", "state": "thinking",
+                                   **({"capture_id": capture_id} if capture_id is not None else {})})
             if self.wake_evaluation is not None:
                 try:
                     result = await self.wake_evaluation.evaluate_audio(
@@ -90,13 +109,16 @@ class VoiceService:
                     await session["send"](result)
                 except (DependencyUnavailable, PlanError, ConflictError) as exc:
                     await session["send"]({"type": "state", "state": "error", "message": str(exc)})
-                finally:
-                    await session["send"]({"type": "state", "state": "idle"})
                 return
             frames = await self.submit(context, binding["wire_robot_id"], audio, "", woke=woke)
-            await self._send_tail(session, frames)
+            for frame in frames[1:]:
+                if capture_id is not None:
+                    frame = {**frame, "capture_id": capture_id}
+                await session["send"](frame)
+                if frame["type"] == "task_state":
+                    self.watch_task(session, frame)
 
-    async def deliver_pcm(self, session, segment):
+    async def deliver_pcm(self, session, segment, *, capture_id=None):
         """Submit one complete PCM-derived WAV through the existing recorded input workflow."""
         if not self.allow_unwoken_pcm and self.wake_evaluation is None:
             raise PlanError("PCM_TASK_SUBMISSION_DISABLED")
@@ -117,50 +139,99 @@ class VoiceService:
                     is_current=lambda: self.sessions.get(key) is session,
                 )
                 if not self.submit_woken_pcm or result["action"] != "command":
-                    return result
-                await session["send"](result)
+                    return {**result, **({"capture_id": capture_id} if capture_id is not None else {})}
+                await session["send"]({**result, **({"capture_id": capture_id} if capture_id is not None else {})})
                 view = await self.inputs.submit_transcribed_audio(
                     context, segment.segment_id, input_id=result["input_id"], text=result["command"],
                     is_current=lambda: self.sessions.get(key) is session,
                 )
             else:
                 view = await self.inputs.audio(context, segment.wav_bytes, "audio/wav", segment.segment_id)
-        return {"type": "pcm_task", "segment_id": segment.segment_id, "request_key": segment.segment_id,
-                "task_id": view.task_id, "state": view.state}
+        receipt = {"type": "pcm_task", "segment_id": segment.segment_id, "request_key": segment.segment_id,
+                   "task_id": view.task_id, "turn_id": view.turn_id or view.task_id,
+                   "version": view.version, "state": view.state}
+        if capture_id is not None:
+            receipt["capture_id"] = capture_id
+        return receipt
 
-    async def _send_tail(self, session, frames):
-        play_secs = 0
-        for frame in frames[1:]:
-            if frame["type"] == "done":
-                play_secs = frame["play_secs"]
-            if frame.get("state") == "idle" and play_secs:
-                await asyncio.sleep(play_secs)
-            await session["send"](frame)
+    async def task_notifications(self, context, receipt, robot_id):
+        """Project committed facts for one turn, including planning-only replies.
 
-    async def on_result(self, customer_id, binding_id, view):
-        session = self.sessions.get((customer_id, binding_id))
-        if session is None or view.state not in {"REPLIED", "SUCCEEDED", "COMPLETED_WITH_SKIPS", "FAILED", "CANCELLED", "BLOCKED"}:
+        Poll only while this connection is waiting for the turn. Reads use the
+        public task boundary and cannot observe an uncommitted status or follow
+        a newer turn in the same conversation. No task or allocation is mutated.
+        """
+        task_id, turn_id = receipt["task_id"], receipt["turn_id"]
+        correlation = {key: receipt[key] for key in ("segment_id", "capture_id") if key in receipt}
+        previous_version = None
+        read_failed = False
+        while True:
+            try:
+                view = await self.inputs.service.get_turn(context, task_id, turn_id)
+            except (NotFoundError, PermissionError):
+                yield {**input_error_frame("TASK_STATUS_UNAVAILABLE", **correlation),
+                       "phase": "task_notification", "task_id": task_id, "turn_id": turn_id}
+                return
+            except Exception as exc:
+                # A read failure is not a task completion. Keep the subscription
+                # until the connection closes or the same durable turn is readable.
+                if not read_failed:
+                    log.error("voice task status read failed task=%s turn=%s error_type=%s",
+                              task_id, turn_id, type(exc).__name__)
+                    code = ("DATABASE_UNAVAILABLE"
+                            if not getattr(self.inputs.service.store, "write_available", True)
+                            else "TASK_STATUS_UNAVAILABLE")
+                    yield {**input_error_frame(code, **correlation),
+                           "phase": "task_notification", "task_id": task_id, "turn_id": turn_id}
+                read_failed = True
+                await asyncio.sleep(1.0)
+                continue
+            if read_failed:
+                log.info("voice task status read recovered task=%s turn=%s", task_id, turn_id)
+            read_failed = False
+            if view.version != previous_version:
+                yield task_frame(view, robot_id=robot_id, **correlation)
+                previous_version = view.version
+            if turn_finished(view):
+                return
+            await asyncio.sleep(0.25)
+
+    def watch_task(self, session, receipt):
+        """Start only after the task receipt has been sent on this connection."""
+        turn_id = receipt["turn_id"]
+        if turn_id in session["task_notifications"]:
             return
-        context = TrustedContext(customer_id, "robot", binding_id)
-        try:
-            # Only that device's own tasks may be spoken through its voice connection.
-            current = await self.inputs.service.get(context, view.task_id)
-        except NotFoundError:
-            return
-        task = asyncio.create_task(self._announce(session, current))
-        self.notifications.add(task)
-        task.add_done_callback(self.notifications.discard)
+        notification = asyncio.create_task(self._notify_task(session, dict(receipt)))
+        session["task_notifications"][turn_id] = notification
+        self.notifications.add(notification)
+        def finished(task):
+            self.notifications.discard(task)
+            if session["task_notifications"].get(turn_id) is task:
+                del session["task_notifications"][turn_id]
+        notification.add_done_callback(finished)
 
-    async def _announce(self, session, view):
+    async def _notify_task(self, session, receipt):
+        binding = session["binding"]
+        key = (binding["customer_id"], binding["binding_id"])
+        context = TrustedContext(key[0], "robot", key[1])
         try:
-            async with session["lock"]:
-                await session["send"]({"type": "state", "state": "thinking"})
-                frames = await self.output.render(robot_id=session["binding"]["wire_robot_id"], transcript="", view=view)
-                await self._send_tail(session, frames)
+            async for frame in self.task_notifications(context, receipt, binding["wire_robot_id"]):
+                if self.sessions.get(key) is not session:
+                    return
+                await session["send"](frame)
+                log.info("voice task notification type=%s task=%s turn=%s state=%s version=%s",
+                         frame["type"], receipt["task_id"], receipt["turn_id"],
+                         frame.get("state"), frame.get("version"))
         except (OSError, RuntimeError):
-            # The persistent TaskView/events remain queryable if voice delivery is lost.
-            return
+            log.warning("voice task notification connection lost task=%s turn=%s",
+                        receipt["task_id"], receipt["turn_id"])
+        except Exception as exc:
+            log.error("voice task notification failed task=%s turn=%s error_type=%s",
+                      receipt["task_id"], receipt["turn_id"], type(exc).__name__)
 
     async def close(self):
-        if self.notifications:
-            await asyncio.gather(*self.notifications, return_exceptions=True)
+        pending = tuple(self.notifications)
+        for task in pending:
+            task.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)

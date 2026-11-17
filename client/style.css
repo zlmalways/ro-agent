@@ -551,6 +551,25 @@ body.chat-open main > header, body.chat-open main > section:not(#conversation) {
 .robot-list { display:flex; flex-wrap:wrap; gap:8px; margin:16px 0; }
 .robot-list button { text-align:left; overflow-wrap:anywhere; }
 .robot-list button[aria-pressed="true"] { background:#eef0ff; border-color:#494fc1; color:#363ca6; }
+.robot-approval { margin:20px 0; padding:18px 20px; border:1px solid var(--line); border-radius:12px; background:#fafbff; }
+.robot-approval-row { display:flex; justify-content:space-between; align-items:center; gap:20px; }
+.robot-approval-copy { min-width:0; }
+.robot-approval-copy h3 { margin:0 0 6px; font-size:17px; }
+.robot-approval-copy p { margin:0; overflow-wrap:anywhere; }
+.robot-approval-control { display:flex; align-items:center; gap:12px; flex-shrink:0; }
+#robot-approval-state { color:var(--muted); font-size:14px; }
+.robot-approval-switch { width:48px; height:28px; padding:3px; border:1px solid #8e97aa; border-radius:20px; background:#8e97aa; flex-shrink:0; }
+.robot-approval-switch > span { display:block; width:20px; height:20px; border-radius:50%; background:white; box-shadow:0 1px 3px #20273830; transition:transform .16s ease; }
+.robot-approval-switch[aria-checked="true"] { border-color:var(--brand); background:var(--brand); }
+.robot-approval-switch[aria-checked="true"] > span { transform:translateX(20px); }
+#robot-approval-effect { margin:16px 0 6px; }
+.robot-approval-note, #robot-approval-feedback { margin:0; font-size:13px; }
+#robot-approval-feedback:not(:empty) { margin-top:8px; }
+@media(max-width:500px) {
+  .robot-approval { padding:16px; }
+  .robot-approval-row { flex-wrap:wrap; gap:12px; }
+}
+@media(prefers-reduced-motion:reduce) { .robot-approval-switch > span { transition:none; } }
 #task-robots { overflow-wrap:anywhere; }
 
 /* Persisted task errors share one presentation in chat, history, and home. */

@@ -205,7 +205,8 @@ async def send_wav(url, token, robot_id, path, timeout=90):
                 reason = str(frame.get("message", "voice error"))
                 if reason != "TTS_UNAVAILABLE":
                     errors.append(reason)
-            if frame.get("type") == "state" and frame.get("state") == "idle":
+            if frame.get("type") in {"done", "task_finished", "pcm_wake"} or (
+                    frame.get("type") == "state" and frame.get("state") == "error"):
                 if errors:
                     raise RuntimeError(", ".join(errors))
                 return
@@ -382,27 +383,28 @@ async def send_pcm(url, token, robot_id, path, *, chunk_ms=20, silence_ms=1000,
                         report["warnings"].append(reason)
                         continue
                     raise RuntimeError(reason)
-                elif state == "idle":
-                    if not report["segments"]:
-                        raise RuntimeError("platform returned idle without a completed PCM segment")
-                    if expect_task and not expect_wake and not report["tasks"]:
-                        raise RuntimeError("platform returned idle without a PCM task receipt")
-                    if expect_wake:
-                        segment_ids = {segment["segment_id"] for segment in report["segments"]}
-                        wake_ids = {result["segment_id"] for result in report["wake_results"]}
-                        if (wake_ids != segment_ids
-                                or len(report["wake_results"]) != len(report["segments"])):
-                            raise RuntimeError("platform returned idle without one wake receipt per PCM segment")
-                        if expect_task:
-                            accepted = {item["segment_id"] for item in report["wake_results"]
-                                        if item["action"] == "command"}
-                            tasks = report["tasks"]
-                            if ({item["segment_id"] for item in tasks} != accepted
-                                    or len(tasks) != len(accepted)
-                                    or len({item["task_id"] for item in tasks}) != len(tasks)
-                                    or any(item["request_key"] != item["segment_id"] for item in tasks)):
-                                raise RuntimeError("tasks do not match the wake-approved PCM segments")
-                    return
+            # This tool checks one upload's receipts, not completion of a robot
+            # task. Wait for the actual expected receipt rather than a voice idle.
+            segment_ids = {item["segment_id"] for item in report["segments"]}
+            if not segment_ids:
+                continue
+            if expect_wake:
+                wake_ids = {item["segment_id"] for item in report["wake_results"]}
+                if wake_ids != segment_ids:
+                    continue
+                if expect_task:
+                    accepted = {item["segment_id"] for item in report["wake_results"]
+                                if item["action"] == "command"}
+                    tasks = report["tasks"]
+                    if {item["segment_id"] for item in tasks} != accepted:
+                        continue
+                    if (len(tasks) != len(accepted)
+                            or len({item["task_id"] for item in tasks}) != len(tasks)
+                            or any(item["request_key"] != item["segment_id"] for item in tasks)):
+                        raise RuntimeError("tasks do not match the wake-approved PCM segments")
+            elif expect_task and {item["segment_id"] for item in report["tasks"]} != segment_ids:
+                continue
+            return
 
     try:
         async with asyncio.timeout(timeout), connection(url, token, robot_id) as ws:
@@ -461,7 +463,7 @@ def main():
     pcm.add_argument("--timeout", type=float, default=30)
     pcm.add_argument("--output-dir", type=Path, required=True)
     expectations = pcm.add_argument_group("receipt checks; combine both to verify wake-gated tasks")
-    expectations.add_argument("--expect-task", action="store_true", help="also require a pcm_task receipt before idle")
+    expectations.add_argument("--expect-task", action="store_true", help="also require a pcm_task admission receipt")
     expectations.add_argument("--expect-wake", action="store_true", help="require wake receipts; add --expect-task to check accepted tasks")
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")

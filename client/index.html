@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
   <title>DeepLeap · 机器人控制台</title>
-  <link rel="icon" href="/client/deepleap-logo.png"><link rel="stylesheet" href="/client/style.css?v=20261110-red-pause">
+  <link rel="icon" href="/client/deepleap-logo.png"><link rel="stylesheet" href="/client/style.css?v=20261115-robot-approval">
 </head>
 <body>
   <aside class="rail">
@@ -47,6 +47,15 @@
       <form id="lookup-form" class="card inline"><label>任务编号<input id="lookup" required></label><button>查询任务</button></form></section>
     <section id="robots" hidden><div class="card"><div class="heading"><h2>机器人资料</h2><button id="refresh-robot" class="quiet">刷新资料</button></div>
       <p class="hint">选择机器人查看资料，不会改变任务的执行机器人。</p><div id="robot-list" class="robot-list" aria-label="已登记机器人"></div>
+      <section id="robot-approval" class="robot-approval" aria-labelledby="robot-approval-title" hidden>
+        <div class="robot-approval-row">
+          <div class="robot-approval-copy"><h3 id="robot-approval-title">免审批执行</h3><p id="robot-approval-target" class="hint"></p></div>
+          <div class="robot-approval-control"><span id="robot-approval-state">尚未读取</span><button id="robot-approval-toggle" type="button" class="robot-approval-switch" role="switch" aria-checked="false" aria-labelledby="robot-approval-title" aria-describedby="robot-approval-target robot-approval-effect robot-approval-feedback" disabled><span aria-hidden="true"></span></button></div>
+        </div>
+        <p id="robot-approval-effect">计划生成后，需要人工批准才会执行。</p>
+        <p class="hint robot-approval-note">只影响新生成的计划；已有计划按生成时的审批规则继续，等待批准的旧计划仍需批准。开启后仍会检查计划、操作权限和机器人状态。</p>
+        <p id="robot-approval-feedback" class="hint" role="status" aria-live="polite"></p>
+      </section>
       <p id="robot-status" role="status">请先设置访问凭据。</p><dl id="robot-fields"></dl></div></section>
     <section id="settings" hidden><form id="settings-form" class="card"><h2>连接工作台</h2>
       <label>访问凭据<input id="credential" type="password" autocomplete="off" spellcheck="false"></label>
@@ -86,5 +95,5 @@
     </section>
   </main>
   <p id="task-alert" class="task-notification" role="status" aria-live="polite"></p>
-  <script src="/client/audio.js" defer></script><script src="/client/home.js?v=20261111-execution-pause" defer></script><script src="/client/app.js?v=20261112-plan-decisions" defer></script>
+  <script src="/client/audio.js" defer></script><script src="/client/home.js?v=20261111-execution-pause" defer></script><script src="/client/app.js?v=20261116-planning-repair" defer></script>
 </body></html>

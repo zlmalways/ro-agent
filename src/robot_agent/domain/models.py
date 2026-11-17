@@ -19,6 +19,16 @@ class PlanError(ModuleFailure, ValueError):
     pass
 
 
+class ModelOutputError(PlanError):
+    """A repairable defect in model-authored content, never a dependency failure."""
+
+    def __init__(self, reason, *, feedback, raw_output="", llm_call_id=None):
+        super().__init__(reason, source="planning", phase="planning")
+        self.feedback = feedback
+        self.raw_output = raw_output
+        self.llm_call_id = llm_call_id
+
+
 class ConflictError(ValueError):
     pass
 
@@ -61,6 +71,12 @@ class CandidateStep:
 
 
 @dataclass(frozen=True)
+class PlanningRepair:
+    previous_output: str
+    feedback: str
+
+
+@dataclass(frozen=True)
 class CandidatePlan:
     outcome: str
     steps: tuple[CandidateStep, ...] = ()
@@ -68,6 +84,9 @@ class CandidatePlan:
     required_slots: tuple[str, ...] = ()
     reason: str = ""
     text: str = ""
+    # Adapter facts; from_dict never accepts these from the model.
+    model_output: str = field(default="", compare=False, repr=False)
+    llm_call_id: str | None = field(default=None, compare=False)
 
     @classmethod
     def from_dict(cls, value: dict) -> "CandidatePlan":
@@ -75,7 +94,7 @@ class CandidatePlan:
         if not isinstance(value, dict) or set(value) - allowed:
             raise PlanError("invalid candidate fields")
         outcome = value.get("outcome")
-        if outcome not in {"plan", "clarify", "unsupported", "reply"}:
+        if not isinstance(outcome, str) or outcome not in {"plan", "clarify", "unsupported", "reply"}:
             raise PlanError("invalid candidate outcome")
         raw_steps = value.get("steps", [])
         if not isinstance(raw_steps, list):
@@ -96,8 +115,13 @@ class CandidatePlan:
                 raise PlanError("invalid dependencies")
             steps.append(CandidateStep(item["step_id"], item["action"], dict(item["args"]), tuple(item["depends_on"])))
         question = value.get("question", "")
-        if outcome == "clarify" and (not isinstance(question, str) or not question.strip()):
+        if not isinstance(question, str):
+            raise PlanError("invalid question")
+        if outcome == "clarify" and not question.strip():
             raise PlanError("clarify requires question")
+        reason = value.get("reason", "")
+        if not isinstance(reason, str):
+            raise PlanError("invalid reason")
         slots = value.get("required_slots", [])
         if not isinstance(slots, list) or any(not isinstance(slot, str) for slot in slots):
             raise PlanError("invalid required slots")
@@ -111,7 +135,7 @@ class CandidatePlan:
                 raise PlanError("reply cannot contain clarification or unsupported fields")
         elif text:
             raise PlanError("text is only allowed for reply")
-        return cls(outcome, tuple(steps), question, tuple(slots), str(value.get("reason", "")), text)
+        return cls(outcome, tuple(steps), question, tuple(slots), reason, text)
 
 
 @dataclass(frozen=True)
@@ -167,6 +191,8 @@ class Plan:
     revision: int
     steps: tuple[PlanStep, ...]
     snapshot_id: str
+    approval_bypass: bool = False
+    approval_bypass_version: int = 0
 
 
 @dataclass(frozen=True)
@@ -313,9 +339,19 @@ class RobotSummary:
 
 
 @dataclass(frozen=True)
+class RobotApprovalSettings:
+    enabled: bool
+    version: int
+    can_edit: bool
+    updated_by: str = ""
+    updated_at: datetime | None = None
+
+
+@dataclass(frozen=True)
 class RobotDetail:
     robot: RobotSummary
     snapshot: ContextSnapshot | None
     last_report: Mapping[str, Any]
     environment: Mapping[str, Any] | None
     capability: Mapping[str, Any] | None
+    approval_settings: RobotApprovalSettings | None = None

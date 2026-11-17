@@ -1,6 +1,6 @@
 """Combine pure plan validation with the injected authorization boundary."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from uuid import uuid4
 
@@ -13,6 +13,15 @@ class CheckResult:
     validation: ValidationResult
     authorization: str
     records: tuple[Decision, ...]
+
+    def with_approval_settings(self, *, enabled, version):
+        """Only confirmation can be waived; policy denial/unavailability stay intact."""
+        record = self.records[-1]
+        result = "allow" if enabled is True and self.authorization == "require_confirmation" else self.authorization
+        record = replace(record, result=result, detail={
+            **record.detail, "approval_bypass": enabled, "approval_bypass_version": version,
+        })
+        return replace(self, authorization=result, records=self.records[:-1] + (record,))
 
 
 class Preflight:
@@ -57,7 +66,11 @@ class Preflight:
             Decision(str(uuid4()), "authorization", result, getattr(self.policy, "version", ""),
                      (snapshot.snapshot_id,), {"phase": phase, "actor_id": context.actor_id, "base_result": base_result}),
         )
-        return CheckResult(validated, result, records)
+        check = CheckResult(validated, result, records)
+        if plan:
+            # Use this plan's captured setting, never the robot's current switch.
+            check = check.with_approval_settings(enabled=plan.approval_bypass, version=plan.approval_bypass_version)
+        return check
 
 
 def approval_covers(evidence, *, customer_id, plan_id, revision, scope, policy_version, now,

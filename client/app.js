@@ -53,6 +53,7 @@ let submission = null;
 let conversationEntered = false, creatingConversation = false, creationRequest = null;
 let fleetSelection = null, fleetLoading = false, fleetExpiry = null;
 let fleetView = null; // Last complete list/detail read; pending reads never partly replace it.
+let fleetApprovalLoaded = false, fleetApprovalSaving = false, fleetApprovalFeedback = '';
 let returnPage = 'home';
 const stopRequests = new Map();
 const endedStates = new Set(['REPLIED', 'SUCCEEDED', 'COMPLETED_WITH_SKIPS', 'FAILED', 'CANCELLED']);
@@ -63,6 +64,7 @@ const announcedErrors = new Set(readSessionList('deepleap.error-notices'));
 const attemptedStops = new Set(readSessionList('deepleap.stop-attempts'));
 const actionAttempts = new Map(readSessionList('deepleap.action-attempts').filter(item => Array.isArray(item) && item.length === 2));
 let errorNoticeTimer = null;
+let platformHealthMessage = '';
 
 function readSessionList(key) {
   try { const value = JSON.parse(sessionStorage.getItem(key) || '[]'); return Array.isArray(value) ? value : []; }
@@ -115,6 +117,7 @@ function requestErrorReason(error) {
     AUTHORIZATION_UNAVAILABLE:'暂时无法确认任务执行权限。',
     AUTHORIZATION_DENY:'当前权限不允许执行这个任务。',
     PERSISTENCE_UNCONFIRMED:'任务记录未能确认保存，操作结果尚未确认。',
+    DATABASE_UNAVAILABLE:'平台数据库不可用，当前任务未继续执行。请稍后重试或重启平台。',
     REQUEST_KEY_REQUIRED:'请求缺少操作编号。',
     ANSWER_REQUIRED:'澄清回答不能为空。',
     NOT_FOUND:'未找到可访问的任务。',
@@ -137,6 +140,24 @@ function requestErrorReason(error) {
   if (error.status === 422) return '提交内容未通过检查。';
   if (error.status >= 500) return '服务处理请求时发生错误，操作结果尚未确认。';
   return '未收到可确认的服务响应，操作结果尚未确认。';
+}
+
+async function pollPlatformHealth() {
+  try {
+    const response = await fetch('/health', {cache: 'no-store'});
+    const data = await response.json();
+    const databaseError = data.error?.code === 'DATABASE_UNAVAILABLE';
+    if (databaseError) {
+      const message = data.error.message + (data.error.probe_exhausted ? ' 请重启平台。' : '');
+      if (!platformHealthMessage || $('notice').textContent === platformHealthMessage) $('notice').textContent = message;
+      platformHealthMessage = message;
+    } else if (platformHealthMessage && $('notice').textContent === platformHealthMessage) {
+      $('notice').textContent = '';
+      platformHealthMessage = '';
+    }
+  } catch {
+    // A missing health response is reported by the normal API request path.
+  }
 }
 
 function normalComposerMessage(task) {
@@ -507,6 +528,9 @@ function resetIdentity() {
   fleetSelection = null;
   fleetView = null;
   fleetLoading = false;
+  fleetApprovalLoaded = fleetApprovalSaving = false;
+  fleetApprovalFeedback = '';
+  renderRobotApproval();
   clearTimeout(fleetExpiry);
   $('robot-list').replaceChildren();
   credential = '';
@@ -566,6 +590,54 @@ const robotIssues = {
 function robotState(robot) {
   return robot.issues.length ? robot.issues.map(value => robotIssues[value] || value).join(' · ') : '在线';
 }
+
+function renderRobotApproval() {
+  const detail = fleetView?.detail;
+  const settings = detail?.approval_settings;
+  $('robot-approval').hidden = page !== 'robots' || !detail;
+  $('robot-approval-target').textContent = detail ? detail.robot.wire_robot_id + ' · ' + detail.robot.binding_id : '';
+  const known = fleetApprovalLoaded && typeof settings?.enabled === 'boolean';
+  $('robot-approval-toggle').setAttribute('aria-checked', String(settings?.enabled === true));
+  $('robot-approval-toggle').disabled = !known || !settings.can_edit || fleetLoading || fleetApprovalSaving;
+  $('robot-approval-state').textContent = fleetApprovalSaving ? '正在保存…' : !known ? '尚未确认' : settings.enabled ? '已开启' : '已关闭';
+  $('robot-approval-effect').textContent = !known ? '请读取最新设置后再操作。' : settings.enabled ?
+    '新计划通过检查后自动执行，无需逐次批准。' : '计划生成后，需要人工批准才会执行。';
+  $('robot-approval-feedback').textContent = fleetApprovalFeedback || (known && !settings.can_edit ? '当前账号没有审批权限，无法修改此设置。' : '');
+  $('refresh-robot').disabled = fleetApprovalSaving;
+  document.querySelectorAll('#robot-list button').forEach(button => { button.disabled = fleetApprovalSaving; });
+}
+
+$('robot-approval-toggle').onclick = async () => {
+  const detail = fleetView?.detail;
+  const settings = detail?.approval_settings;
+  if (page !== 'robots' || !fleetApprovalLoaded || !settings?.can_edit || fleetLoading || fleetApprovalSaving) return;
+  const epoch = identityEpoch;
+  const bindingId = detail.robot.binding_id;
+  fleetApprovalSaving = true;
+  fleetApprovalFeedback = '';
+  renderRobotApproval();
+  try {
+    const updated = await api('/robots/' + encodeURIComponent(bindingId) + '/approval-bypass', {
+      method: 'PUT', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({enabled: !settings.enabled, expected_version: settings.version})
+    });
+    if (epoch !== identityEpoch || fleetView?.selected !== bindingId) return;
+    fleetView.detail.approval_settings = updated;
+    fleetApprovalLoaded = true;
+    fleetApprovalFeedback = '已保存，当前机器人免审批执行' + (updated.enabled ? '已开启。' : '已关闭。');
+  } catch (error) {
+    if (epoch !== identityEpoch || fleetView?.selected !== bindingId) return;
+    fleetApprovalLoaded = false;
+    fleetApprovalFeedback = error.status === 409 ? '设置已被其他页面修改，请刷新资料后再操作。' :
+      error.status === 403 ? '没有修改此机器人审批设置的权限。请刷新资料。' : '保存结果尚未确认，请刷新资料核对。' + error.message;
+  } finally {
+    if (epoch === identityEpoch) {
+      fleetApprovalSaving = false;
+      renderRobotApproval();
+    }
+  }
+};
+
 function renderFleet(current, status) {
   const robots = fleetView?.robots || [];
   $('robot-list').replaceChildren(...robots.map(robot => {
@@ -601,6 +673,7 @@ function renderFleet(current, status) {
     for (const [label, value] of fields) $('robot-fields').append(node('dt', label), node('dd', value));
   }
   $('robot-status').textContent = status;
+  renderRobotApproval();
 }
 
 function sameRobotRead(listed, detail) {
@@ -616,11 +689,13 @@ function loadRobotDetails(bindingId) {
 }
 
 async function loadRobot(bindingId) {
-  if (!credential) return;
+  if (!credential || fleetApprovalSaving) return;
   const detailOnly = typeof bindingId === 'string';
   if (detailOnly) fleetSelection = bindingId;
   const request = ++fleetRequest;
   fleetLoading = true;
+  fleetApprovalLoaded = false;
+  fleetApprovalFeedback = '';
   clearTimeout(fleetExpiry);
   const historical = '显示上次资料（历史），当前就绪状态尚未确认。';
   renderFleet(false, '正在读取机器人资料。' + historical);
@@ -638,6 +713,8 @@ async function loadRobot(bindingId) {
     // Publish only after every required read succeeds and belongs to this request/customer.
     fleetSelection = selected;
     fleetView = {robots, detail, selected};
+    fleetApprovalLoaded = !!detail?.approval_settings;
+    if (detail && !fleetApprovalLoaded) fleetApprovalFeedback = '当前服务尚未提供免审批设置，请更新并重启开发服务。';
     const deadline = detail?.snapshot?.valid_until;
     const current = !deadline || Date.parse(deadline) > Date.now();
     const expired = '上次资料已过期。' + historical + '请刷新资料。';
@@ -651,7 +728,10 @@ async function loadRobot(bindingId) {
   } catch (error) {
     if (request === fleetRequest) renderFleet(false, '资料未更新。' + historical + error.message);
   } finally {
-    if (request === fleetRequest) fleetLoading = false;
+    if (request === fleetRequest) {
+      fleetLoading = false;
+      renderRobotApproval();
+    }
   }
 }
 
@@ -667,6 +747,7 @@ function navigate() {
     else a.removeAttribute('aria-current');
   });
   $('page-title').textContent = pages[page] || '任务对话';
+  renderRobotApproval();
   $('notice').textContent = '';
   conversation(page === 'chat', false);
   updateControls();
@@ -720,6 +801,7 @@ function errorCard(view) {
   const card = node('section', '', 'task-error-card');
   card.setAttribute('aria-label', '任务错误');
   const sources = {scheduling:'任务调度', planning:'计划生成', resources:'机器人资料检查',
+    configuration:'配置检查', planner_call:'模型接口调用',
     authorization:'权限检查', transport:'机器人通信', execution:'机器人执行', runtime:'平台运行',
     input:'任务输入', storage:'任务记录'};
   const phases = {scheduling:'安排机器人', planning:'生成计划', admission:'计划受理检查', approval:'批准检查', dispatch:'下发前检查',
@@ -1337,6 +1419,7 @@ setInterval(async () => {
   }
 }, 700);
 setInterval(() => {
+  pollPlatformHealth();
   if (credential && !document.hidden) {
     if (page === 'home') board.load(true);
     if (page === 'tasks') loadHistory();

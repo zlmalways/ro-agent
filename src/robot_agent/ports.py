@@ -4,13 +4,13 @@ from contextlib import AbstractAsyncContextManager
 from typing import Mapping, Protocol
 
 from robot_agent.domain.models import (
-    CandidatePlan, ChangeSet, Command, ContextSnapshot, SendObservation, Task, TaskEvent, TrustedContext,
+    CandidatePlan, ChangeSet, Command, ContextSnapshot, PlanningRepair, SendObservation, Task, TaskEvent, TrustedContext,
 )
 
 
 class PlannerPort(Protocol):
     async def call_llm(self, conversation_id: str, snapshot: ContextSnapshot, *,
-                       turn_id: str | None = None) -> CandidatePlan: ...
+                       turn_id: str | None = None, repair: PlanningRepair | None = None) -> CandidatePlan: ...
 
 
 class ConnectedRobots(Protocol):

@@ -39,7 +39,8 @@ def inflight_commands(task: Task) -> tuple[Command, ...]:
 
 def is_abandoned(task: Task) -> bool:
     """Policy-ended tasks accept old evidence without resuming execution."""
-    return task.state == "CANCELLED" and task.reason_code in {"RESTART_TASK_LOST", "ROBOT_DISABLED"}
+    return task.state == "CANCELLED" and task.reason_code in {
+        "RESTART_TASK_LOST", "ROBOT_DISABLED", "COMMAND_CONNECTION_LOST"}
 
 
 def check_transition(task: Task, command: Command | None, event: RobotEvent, *, current_generation=None) -> ChangeSet:

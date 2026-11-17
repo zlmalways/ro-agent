@@ -2,12 +2,13 @@
 
 from datetime import datetime, timedelta, timezone
 import json
+import logging
 from uuid import uuid4
 
 from robot_agent.domain.models import ConflictError, ContextSnapshot, DependencyUnavailable, PlanError
 
 from robot_agent.ports import ConnectedRobots
-from robot_agent.domain.models import RobotDetail, RobotSummary
+from robot_agent.domain.models import RobotApprovalSettings, RobotDetail, RobotSummary
 from robot_agent.domain.robot_report import REPORT_FIELDS, RobotReportError, brain_skill_id, validate_report_value
 
 
@@ -56,6 +57,30 @@ class Resources:
         self.use_reported_waypoints = use_reported_waypoints
         self.connected_robots = connected_robots
         self.missing_credentials = frozenset(missing_credentials)
+
+    @staticmethod
+    def _approval_settings(context, binding):
+        return RobotApprovalSettings(
+            enabled=binding["approval_bypass"], version=binding["approval_bypass_version"],
+            can_edit=context.actor_kind == "user" and "approver" in context.roles,
+            updated_by=binding["approval_bypass_updated_by"], updated_at=binding["approval_bypass_updated_at"],
+        )
+
+    async def set_approval_bypass(self, context, binding_id, enabled, expected_version):
+        if context.actor_kind != "user" or "approver" not in context.roles:
+            raise PermissionError("ROBOT_APPROVAL_SETTINGS_DENIED")
+        if type(enabled) is not bool or type(expected_version) is not int or expected_version < 1:
+            raise PlanError("INVALID_ROBOT_APPROVAL_SETTINGS")
+        async with self.store.system_unit_of_work() as tx:
+            binding = await tx.get_binding(context.customer_id, binding_id)
+            if binding is None:
+                raise PermissionError("RESOURCE_BINDING_DENIED")
+            updated = await tx.set_approval_bypass(context, binding_id, enabled, expected_version)
+        logging.getLogger(__name__).info(
+            "robot_approval_bypass_changed customer_id=%s binding_id=%s actor_id=%s enabled=%s version=%s",
+            context.customer_id, binding_id, context.actor_id, enabled, updated["approval_bypass_version"],
+        )
+        return self._approval_settings(context, updated)
 
     async def put(self, context, binding_id, kind, entries, source_refs, *, base_version=None):
         if "maintainer" not in context.roles:
@@ -212,4 +237,5 @@ class Resources:
             snapshot = None
         summary = RobotSummary(binding_id, binding["wire_robot_id"], binding["enabled"], connected,
                                binding["isolation_reason"], binding["connection_generation"], tuple(issues))
-        return RobotDetail(summary, snapshot, last_report, environment, capability)
+        return RobotDetail(summary, snapshot, last_report, environment, capability,
+                           self._approval_settings(context, binding))

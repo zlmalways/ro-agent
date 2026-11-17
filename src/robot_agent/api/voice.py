@@ -1,4 +1,3 @@
-import asyncio
 import json
 
 from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
@@ -30,11 +29,10 @@ async def robot_voice_stream(request: Request, audio: UploadFile = File(...), ro
     async def frames():
         yield json.dumps({"type": "state", "state": "thinking"}) + "\n"
         result = await voice.submit(context, robot_id, value, key, woke=woke)
-        duration = 0
         for frame in result[1:]:
-            if frame["type"] == "done":
-                duration = frame["play_secs"]
-            if frame.get("state") == "idle" and duration:
-                await asyncio.sleep(duration)
             yield json.dumps(frame, ensure_ascii=False) + "\n"
+        receipt = next((frame for frame in result if frame["type"] == "task_state"), None)
+        if receipt is not None:
+            async for frame in voice.task_notifications(context, receipt, robot_id):
+                yield json.dumps(frame, ensure_ascii=False) + "\n"
     return StreamingResponse(frames(), media_type="application/x-ndjson", headers={"Cache-Control": "no-cache"})

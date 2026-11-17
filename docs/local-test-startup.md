@@ -2,6 +2,7 @@
 
 本入口使用第一步准备好的独立 PostgreSQL 数据目录、数据库和测试凭据。运行当前工作区源码，不切换正式平台。当前已验证 Windows Git Bash；其他系统和终端模拟器不在本次验证范围内。
 
+> 2026-11-12 更新：测试与正式入口现在共用 `tools/start-runtime.sh` / `tools/dev_runtime.py`。测试配置增加 `version: 1`、`environment: test`、`postgresql.admin_user`、`log_directory`；正式发布与配置覆盖见 [本机发布说明](formal-release.md)。以下历史验收不是这次改动的新验收结果。现在的测试配置已启用执行和 PCM，不能直接照旧运行要求空数据库的历史验收脚本。
 ## 日常启动与退出
 
 在 Git Bash 中执行：
@@ -57,4 +58,4 @@ bash start-dev.sh
 
 验收覆盖：冷启动、已有数据库 PID 不变地复用、重复平台启动被拒绝、真实独立 Windows 控制台 Ctrl+C、平台正常关闭日志、测试库继续运行，以及错误密码/正式端口/项目外数据目录在平台启动前被拒绝。报告为 `test-db/launcher-verification.json`，各用例日志为 `test-db/launcher-*.log`。
 
-当前业务配置关闭机器人执行和 PCM 语音处理；外部模型调用由 `config/dev.local.json` 的 `allow_external_calls` 和 `llm` 配置控制。用户和机器人配置可加载，两台机器人保持离线。启动验收不证明模型规划、语音识别或真机动作能力。
+上述首次验收时关闭了机器人执行和 PCM；这不是当前配置状态。2026-11-12 的共用入口启动检查使用当前配置，显式入口是 `python -B -m tests.acceptance.verify_shared_launcher`；已有测试平台运行时，只有获准后才加 `--restart-running-test-platform`。它核对真实启动、网页、认证查询、重复启动拒绝和 Ctrl+C，成功后删除本轮 TEST 日志，不提交模型或机器人任务。这些检查不证明语音识别、模型规划或真机动作能力。

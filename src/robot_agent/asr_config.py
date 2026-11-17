@@ -7,6 +7,9 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 
+ALIYUN_FLASH_MODEL = "fun-asr-flash-2026-06-15"
+
+
 @dataclass(frozen=True)
 class AsrConfig:
     provider: str
@@ -16,6 +19,7 @@ class AsrConfig:
     model: str = ""
     resource_id: str = ""
     stream_url: str = ""
+    base_url: str = ""
 
 
 def read_credentials(configuration):
@@ -39,8 +43,8 @@ def load_asr_config(configuration, *, credentials=None):
     if not isinstance(settings, dict):
         raise ValueError("voice_asr must be an object")
     provider = settings.get("provider")
-    if provider not in ("disabled", "openai", "doubao"):
-        raise ValueError("voice_asr.provider must be disabled, openai or doubao")
+    if provider not in ("disabled", "openai", "doubao", "aliyun"):
+        raise ValueError("voice_asr.provider must be disabled, openai, doubao or aliyun")
     if provider == "disabled" or configuration.get("allow_external_calls") is not True:
         return None
 
@@ -58,11 +62,26 @@ def load_asr_config(configuration, *, credentials=None):
     max_bytes = limits.get("provider_response_bytes") if isinstance(limits, dict) else None
     if isinstance(max_bytes, bool) or not isinstance(max_bytes, int) or max_bytes <= 0:
         raise ValueError("limits.provider_response_bytes must be a positive integer")
-    model, resource_id, stream_url = "", "", ""
+    model, resource_id, stream_url, base_url = "", "", "", ""
     if provider == "openai":
         model = required_text("model")
         if settings.get("mode", "file") != "file":
             raise ValueError("voice_asr.mode must be file for openai")
+    elif provider == "aliyun":
+        model = required_text("model")
+        if model != ALIYUN_FLASH_MODEL:
+            raise ValueError(f"voice_asr.model must be {ALIYUN_FLASH_MODEL} for aliyun")
+        if settings.get("mode", "file") != "file":
+            raise ValueError("voice_asr.mode must be file for aliyun")
+        base_url = required_text("base_url").rstrip("/")
+        try:
+            target = urlsplit(base_url)
+            valid = (target.scheme == "https" and target.hostname and target.port != 0
+                     and not (target.username or target.password or target.query or target.fragment or target.path))
+        except ValueError:
+            valid = False
+        if not valid:
+            raise ValueError("voice_asr.base_url must be an https origin without embedded credentials")
     else:
         if settings.get("mode", "stream") != "stream":
             raise ValueError("voice_asr.mode must be stream for doubao")
@@ -86,4 +105,4 @@ def load_asr_config(configuration, *, credentials=None):
     api_key = credentials.get(key_name)
     if not isinstance(api_key, str) or not api_key.strip():
         raise ValueError(f"credentials_file is missing {key_name}")
-    return AsrConfig(provider, api_key.strip(), timeout, max_bytes, model, resource_id, stream_url)
+    return AsrConfig(provider, api_key.strip(), timeout, max_bytes, model, resource_id, stream_url, base_url)

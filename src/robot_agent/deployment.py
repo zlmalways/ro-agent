@@ -8,6 +8,7 @@ import socket
 import asyncpg
 
 from robot_agent.adapters.asr import DoubaoASR, DoubaoStream, OpenAIASR
+from robot_agent.adapters.aliyun_asr import AliyunASR
 from robot_agent.asr_config import load_asr_config
 from robot_agent.adapters.dlv0 import Dlv0Robot
 from robot_agent.adapters.identity import ConfiguredIdentity
@@ -20,8 +21,8 @@ from robot_agent.application.resources import Resources
 from robot_agent.application.task_service import TaskService
 from robot_agent.config import load_provider_config
 from robot_agent.domain.models import ActionCatalog
+from robot_agent.logging_config import configure_application_logging
 from robot_agent.runtime import Runtime, RuntimeOwnership, SubmissionOrderQueue
-from robot_agent.timing import configure_timing_logging
 
 
 _ASR_NOT_LOADED = object()
@@ -30,9 +31,10 @@ _ASR_NOT_LOADED = object()
 def _pcm_settings(configuration):
     settings = configuration.get("voice_pcm", {})
     if not isinstance(settings, dict) or any(
-        not isinstance(settings.get(key, False), bool) for key in ("enabled", "submit_tasks", "evaluate_wake")
+        not isinstance(settings.get(key, False), bool)
+        for key in ("enabled", "submit_tasks", "evaluate_wake")
     ):
-        raise ValueError("voice_pcm.enabled, submit_tasks and evaluate_wake must be booleans")
+        raise ValueError("voice_pcm switches must be booleans")
     if (settings.get("submit_tasks") or settings.get("evaluate_wake")) and not settings.get("enabled"):
         raise ValueError("PCM processing requires PCM capture to be enabled")
     wav_save_dir = settings.get("wav_save_dir")
@@ -52,7 +54,7 @@ def build_pcm_segments(configuration, environment):
 
 
 def build_pcm_voice(configuration, inputs):
-    """With both switches enabled, only wake-approved PCM creates tasks."""
+    """Assemble PCM processing; evaluate_wake selects platform-side wake filtering."""
     settings = _pcm_settings(configuration)
     if not settings.get("submit_tasks") and not settings.get("evaluate_wake"):
         return None
@@ -82,6 +84,11 @@ def build_asr(settings):
             api_key=settings.api_key, model=settings.model,
             timeout_seconds=settings.timeout_seconds, max_response_bytes=settings.max_response_bytes,
         )
+    if settings.provider == "aliyun":
+        return AliyunASR(
+            api_key=settings.api_key, model=settings.model, base_url=settings.base_url,
+            timeout_seconds=settings.timeout_seconds, max_response_bytes=settings.max_response_bytes,
+        )
     if settings.provider != "doubao":
         raise ValueError("unsupported ASR provider")
     return DoubaoASR(DoubaoStream(
@@ -91,7 +98,7 @@ def build_asr(settings):
 
 
 def build_app(configuration, *, environment=None, asr_config=_ASR_NOT_LOADED):
-    configure_timing_logging()
+    configure_application_logging()
     environment = os.environ if environment is None else environment
     if configuration.get("allow_external_calls") is not True:
         asr_config = None

@@ -4,12 +4,13 @@ from robot_agent.domain.models import Command, PlanError
 from robot_agent.protocol.dlv0_schema import cancel_frame, command_frame, parse_frame, ready_frame
 
 
-def test_dlv0_frames_unchanged():
+def test_dlv0_frames_with_plan_metadata():
     command = Command("test-cmd", "task", "customer", "unit", "plan", "s1", "binding",
                       "move_to", {"location": "table"}, 1)
     assert ready_frame("test-robot") == {"type": "state", "state": "ready", "protocol": "dlv/0", "robot_id": "test-robot"}
     assert ready_frame("test-robot", command_channel=True) == {"type": "state", "state": "ready", "channel": "command", "robot_id": "test-robot"}
-    assert command_frame(command) == {"type": "command", "skill": "move_to", "args": {"location": "table"}, "cmd_id": "test-cmd"}
+    assert command_frame(command) == {"type": "command", "skill": "move_to",
+                                      "args": {"location": "table"}, "cmd_id": "test-cmd", "plan_id": "plan"}
     assert cancel_frame("test-cmd") == {"type": "cancel", "cmd_id": "test-cmd"}
     hello = {"type": "hello", "robot_id": "test-robot", "skills": ["move_to", "vla_skill"],
              "capabilities": ["locomotion", "manipulation"], "busy_cmd_id": "", "runtime_id": "runtime-1"}

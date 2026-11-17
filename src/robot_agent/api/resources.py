@@ -3,7 +3,7 @@
 from dataclasses import asdict
 
 from fastapi import APIRouter, HTTPException, Request
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field, StrictBool
 
 from robot_agent.domain.models import ConflictError, DependencyUnavailable, PlanError
 
@@ -16,6 +16,12 @@ class ResourceInput(BaseModel):
     entries: dict[str, str]
     source_refs: list[str]
     base_version: int
+
+
+class RobotApprovalInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    enabled: StrictBool
+    expected_version: int = Field(strict=True, ge=1)
 
 
 async def web_context(request):
@@ -91,3 +97,19 @@ async def robot_detail(binding_id: str, request: Request):
         return asdict(await request.app.state.resources.robot_detail(context, binding_id))
     except PermissionError as exc:
         raise HTTPException(403, str(exc)) from None
+
+
+@router.put("/api/robot-agent/robots/{binding_id}/approval-bypass")
+async def set_robot_approval(binding_id: str, body: RobotApprovalInput, request: Request):
+    context = await web_context(request)
+    try:
+        if request.app.state.resources is None:
+            raise DependencyUnavailable("RESOURCES_UNAVAILABLE")
+        return asdict(await request.app.state.resources.set_approval_bypass(
+            context, binding_id, body.enabled, body.expected_version))
+    except PermissionError as exc:
+        raise HTTPException(403, str(exc)) from None
+    except ConflictError as exc:
+        raise HTTPException(409, str(exc)) from None
+    except PlanError as exc:
+        raise HTTPException(422, str(exc)) from None

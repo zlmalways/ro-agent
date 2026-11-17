@@ -1,0 +1,225 @@
+{
+  "sentence": {
+    "sentence_id": 1,
+    "begin_time": 400,
+    "end_time": 3520,
+    "text": "小千小千，打开冰箱拿一瓶可乐。",
+    "channel_id": 0,
+    "speaker_id": null,
+    "sentence_end": true,
+    "words": [
+      {
+        "begin_time": 400,
+        "end_time": 640,
+        "text": "小",
+        "punctuation": "",
+        "fixed": true,
+        "speaker_id": null
+      },
+      {
+        "begin_time": 640,
+        "end_time": 880,
+        "text": "千",
+        "punctuation": "",
+        "fixed": true,
+        "speaker_id": null
+      },
+      {
+        "begin_time": 880,
+        "end_time": 1080,
+        "text": "小",
+        "punctuation": "",
+        "fixed": true,
+        "speaker_id": null
+      },
+      {
+        "begin_time": 1080,
+        "end_time": 1240,
+        "text": "千",
+        "punctuation": "，",
+        "fixed": true,
+        "speaker_id": null
+      },
+      {
+        "begin_time": 1440,
+        "end_time": 1920,
+        "text": "打",
+        "punctuation": "",
+        "fixed": true,
+        "speaker_id": null
+      },
+      {
+        "begin_time": 1920,
+        "end_time": 2053,
+        "text": "开",
+        "punctuation": "",
+        "fixed": true,
+        "speaker_id": null
+      },
+      {
+        "begin_time": 2053,
+        "end_time": 2186,
+        "text": "冰",
+        "punctuation": "",
+        "fixed": true,
+        "speaker_id": null
+      },
+      {
+        "begin_time": 2186,
+        "end_time": 2320,
+        "text": "箱",
+        "punctuation": "",
+        "fixed": true,
+        "speaker_id": null
+      },
+      {
+        "begin_time": 2320,
+        "end_time": 2440,
+        "text": "拿",
+        "punctuation": "",
+        "fixed": true,
+        "speaker_id": null
+      },
+      {
+        "begin_time": 2440,
+        "end_time": 2760,
+        "text": "一瓶",
+        "punctuation": "",
+        "fixed": true,
+        "speaker_id": null
+      },
+      {
+        "begin_time": 2760,
+        "end_time": 2920,
+        "text": "可",
+        "punctuation": "",
+        "fixed": true,
+        "speaker_id": null
+      },
+      {
+        "begin_time": 2920,
+        "end_time": 3520,
+        "text": "乐",
+        "punctuation": "。",
+        "fixed": true,
+        "speaker_id": null
+      }
+    ]
+  },
+  "text": "小千小千，打开冰箱拿一瓶可乐。",
+  "request_id": "03b7cb9e-a63f-92f6-b4eb-e4752a6365f6",
+  "output": {
+    "sentence": {
+      "sentence_id": 1,
+      "begin_time": 400,
+      "end_time": 3520,
+      "text": "小千小千，打开冰箱拿一瓶可乐。",
+      "channel_id": 0,
+      "speaker_id": null,
+      "sentence_end": true,
+      "words": [
+        {
+          "begin_time": 400,
+          "end_time": 640,
+          "text": "小",
+          "punctuation": "",
+          "fixed": true,
+          "speaker_id": null
+        },
+        {
+          "begin_time": 640,
+          "end_time": 880,
+          "text": "千",
+          "punctuation": "",
+          "fixed": true,
+          "speaker_id": null
+        },
+        {
+          "begin_time": 880,
+          "end_time": 1080,
+          "text": "小",
+          "punctuation": "",
+          "fixed": true,
+          "speaker_id": null
+        },
+        {
+          "begin_time": 1080,
+          "end_time": 1240,
+          "text": "千",
+          "punctuation": "，",
+          "fixed": true,
+          "speaker_id": null
+        },
+        {
+          "begin_time": 1440,
+          "end_time": 1920,
+          "text": "打",
+          "punctuation": "",
+          "fixed": true,
+          "speaker_id": null
+        },
+        {
+          "begin_time": 1920,
+          "end_time": 2053,
+          "text": "开",
+          "punctuation": "",
+          "fixed": true,
+          "speaker_id": null
+        },
+        {
+          "begin_time": 2053,
+          "end_time": 2186,
+          "text": "冰",
+          "punctuation": "",
+          "fixed": true,
+          "speaker_id": null
+        },
+        {
+          "begin_time": 2186,
+          "end_time": 2320,
+          "text": "箱",
+          "punctuation": "",
+          "fixed": true,
+          "speaker_id": null
+        },
+        {
+          "begin_time": 2320,
+          "end_time": 2440,
+          "text": "拿",
+          "punctuation": "",
+          "fixed": true,
+          "speaker_id": null
+        },
+        {
+          "begin_time": 2440,
+          "end_time": 2760,
+          "text": "一瓶",
+          "punctuation": "",
+          "fixed": true,
+          "speaker_id": null
+        },
+        {
+          "begin_time": 2760,
+          "end_time": 2920,
+          "text": "可",
+          "punctuation": "",
+          "fixed": true,
+          "speaker_id": null
+        },
+        {
+          "begin_time": 2920,
+          "end_time": 3520,
+          "text": "乐",
+          "punctuation": "。",
+          "fixed": true,
+          "speaker_id": null
+        }
+      ]
+    },
+    "text": "小千小千，打开冰箱拿一瓶可乐。",
+    "request_id": "03b7cb9e-a63f-92f6-b4eb-e4752a6365f6"
+  },
+  "usage": {
+    "duration": 4
+  }
+}

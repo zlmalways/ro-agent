@@ -8,11 +8,12 @@ import json
 from uuid import NAMESPACE_URL, uuid4, uuid5
 
 from robot_agent.domain.models import (
-    ChangeSet, ConflictError, Decision, DependencyUnavailable, NotFoundError, Plan, PlanError, PreflightBlocked,
-    RobotAllocation, SendObservation, Task, TaskEvent, TaskView, TrustedContext,
+    ChangeSet, ConflictError, Decision, DependencyUnavailable, ModelOutputError, NotFoundError, Plan, PlanError,
+    PlanningRepair, PreflightBlocked, RobotAllocation, SendObservation, Task, TaskEvent, TaskView, TrustedContext,
 )
 from robot_agent.domain.errors import error_code, make_error, public_error, stop_task
 from robot_agent.domain.conversation import conversation_interaction
+from robot_agent.domain.validation import validate_plan
 
 from .scheduling import schedule
 from .executor import Executor
@@ -379,7 +380,6 @@ class TaskService:
                 if (current.state != "PLANNING" or current.version != work.task.version or allocation is None
                         or allocation.allocation_id != work.allocation.allocation_id):
                     return
-                await tx.append_event(current.task_id, TaskEvent("planner_request_started", {}))
             await self._generate_plan(work.task, work.allocation.snapshot, work=work)
         except asyncio.CancelledError:
             # A shutdown/explicit cancellation invalidates unsent planning only.
@@ -477,21 +477,83 @@ class TaskService:
             return work.job
         return None
 
+    async def _current_planning_task(self, tx, work):
+        """Re-read ownership/cancellation before each model attempt and retry event."""
+        current = await tx.load_task(work.task.task_id, for_update=True)
+        if (self._closing or current.state != "PLANNING" or current.version != work.task.version
+                or current.cancel_requested or current.advancement_stopped or current.result_disputed):
+            return None
+        if await self._abandon_if_disabled(tx, current):
+            return None
+        allocation = await tx.task_allocation(current)
+        binding = await tx.get_binding(current.customer_id, work.allocation.robot_binding_id)
+        if (allocation is None or allocation.allocation_id != work.allocation.allocation_id
+                or allocation.snapshot.snapshot_id != work.allocation.snapshot.snapshot_id
+                or not binding or not binding["enabled"] or binding["isolation_reason"]
+                or binding["connection_generation"] != work.allocation.snapshot.generation):
+            changed = stop_task(replace(current, state="BLOCKED", version=current.version + 1),
+                                "REVALIDATION_REQUIRED", phase="planning")
+            await self._persist(tx, ChangeSet(changed))
+            await tx.append_event(current.task_id, TaskEvent("planning_interrupted", {"reason_code": "REVALIDATION_REQUIRED"}))
+            await self._release_unstarted(tx, changed)
+            return None
+        return current
+
+    async def _generate_candidate(self, task, snapshot, *, work):
+        """One initial attempt plus one content repair within this task's planning work."""
+        repair = None
+        for attempt in (1, 2):
+            if self.ownership is not None and not await self.ownership.healthy():
+                raise DependencyUnavailable("OWNERSHIP_UNAVAILABLE")
+            async with self.store.system_unit_of_work() as tx:
+                if await self._current_planning_task(tx, work) is None:
+                    return None
+                await tx.append_event(task.task_id, TaskEvent("planner_request_started", {
+                    "attempt": attempt, "repair": repair is not None,
+                }))
+            candidate = None
+            try:
+                planner_call = getattr(self.planner, "call_llm", None)
+                if planner_call is not None:
+                    options = {"repair": repair} if repair is not None else {}
+                    candidate = await planner_call(task.conversation_id or task.task_id, snapshot,
+                                                   turn_id=task.task_id, **options)
+                elif repair is None:
+                    # Legacy development adapters cannot silently drop repair feedback.
+                    candidate = await self.planner.plan(task.goal_text, list(task.answers), snapshot)
+                else:
+                    raise DependencyUnavailable("PLANNER_REPAIR_UNAVAILABLE", source="configuration")
+                if candidate.outcome == "plan":
+                    if self.max_plan_steps is not None and len(candidate.steps) > self.max_plan_steps:
+                        raise ModelOutputError("PLAN_LIMIT_EXCEEDED",
+                                               feedback=f"计划最多允许 {self.max_plan_steps} 步，请重新生成完整计划。")
+                    validate_plan(candidate, snapshot, self.catalog, model_output=True)
+                return candidate
+            except ModelOutputError as exc:
+                raw_output = exc.raw_output or (candidate.model_output if candidate is not None else "")
+                call_id = exc.llm_call_id or (candidate.llm_call_id if candidate is not None else None)
+                async with self.store.system_unit_of_work() as tx:
+                    if await self._current_planning_task(tx, work) is None:
+                        return None
+                    if call_id is not None:
+                        await tx.mark_llm_output_invalid(task.customer_id, call_id, task.task_id)
+                    await tx.append_event(task.task_id, TaskEvent("planner_output_invalid", {
+                        "attempt": attempt, "llm_call_id": call_id, "reason_code": exc.reason,
+                        "feedback": exc.feedback, "will_retry": attempt == 1,
+                    }))
+                if attempt == 2:
+                    raise PlanError("PLANNER_REPAIR_FAILED", source="planning", phase="planning") from exc
+                repair = PlanningRepair(raw_output, exc.feedback)
+
     async def _generate_plan(self, task, snapshot, *, work):
         context = TrustedContext(task.customer_id, task.actor_kind, task.actor_id)
         records = ()
+        check = None
         assistant_message = None
         try:
-            planner_call = getattr(self.planner, "call_llm", None)
-            if planner_call is not None:
-                candidate = await planner_call(task.conversation_id or task.task_id, snapshot,
-                                               turn_id=task.task_id)
-            else:
-                # Compatibility for old development fixtures.  The production
-                # adapter uses call_llm and never reconstructs context from answers.
-                candidate = await self.planner.plan(task.goal_text, list(task.answers), snapshot)
-            if self.max_plan_steps is not None and len(candidate.steps) > self.max_plan_steps:
-                raise PlanError("PLAN_LIMIT_EXCEEDED")
+            candidate = await self._generate_candidate(task, snapshot, work=work)
+            if candidate is None:
+                return  # A cancelled/replaced planning turn cannot start another attempt or be revived.
             if candidate.outcome == "reply":
                 changed = replace(task, state="REPLIED", reason_code="", clarification="", clarification_id="")
                 assistant_message = ("reply", candidate.text)
@@ -530,6 +592,19 @@ class TaskService:
             if (current.version != task.version or current.state != "PLANNING" or allocation is None
                     or allocation.allocation_id != work.allocation.allocation_id or allocation.snapshot.snapshot_id != snapshot.snapshot_id):
                 return  # Cancellation/recovery won; never resurrect it or release a later task's slot.
+            if check is not None and changed.plan is not None:
+                # The setting write uses the same short system transaction lock.
+                # Capture it at plan creation, including changes made while the LLM ran.
+                binding = await tx.get_binding(task.customer_id, snapshot.robot_binding_id)
+                if binding is None:
+                    raise DependencyUnavailable("ROBOT_BINDING_UNAVAILABLE")
+                enabled, version = binding["approval_bypass"], binding["approval_bypass_version"]
+                check = check.with_approval_settings(enabled=enabled, version=version)
+                changed = replace(changed, plan=replace(changed.plan, approval_bypass=enabled,
+                                                       approval_bypass_version=version))
+                if changed.state == "WAITING_APPROVAL" and check.authorization == "allow":
+                    changed = replace(changed, state="READY", reason_code="")
+                records = check.records
             changed = replace(changed, version=current.version + 1)
             await self._persist(tx, ChangeSet(changed, decisions=records), assistant_message=assistant_message)
             await tx.append_event(task.task_id, TaskEvent("planned", {"state": changed.state, "reason_code": changed.reason_code}))
@@ -1139,9 +1214,15 @@ class TaskService:
             if stored is None or not stored["enabled"] or stored["wire_robot_id"] != frame["robot_id"]:
                 raise PermissionError("robot binding unavailable")
             tasks = await tx.tasks_for_binding(binding)
+            # A new command connection starts a new execution session. This also
+            # covers replacement before the old socket's finally/unregister ran.
+            for task in tasks:
+                await self._abandon_task(tx, task, "COMMAND_CONNECTION_LOST")
+            tasks = await tx.tasks_for_binding(binding)
             generation = await tx.activate_binding(stored, frame)
             await self._observe_busy(tx, stored, generation, frame, tasks)
-            return generation
+        await self._cancel_invalid_planning()
+        return generation
 
     async def _observe_busy(self, tx, binding, generation, frame, tasks):
         command_id = frame.get("busy_cmd_id", "")
@@ -1177,20 +1258,8 @@ class TaskService:
             if stored is None or stored["connection_generation"] != generation:
                 return
             for task in await tx.tasks_for_binding(binding):
-                if not stored["enabled"]:
-                    await self._abandon_task(tx, task, "ROBOT_DISABLED")
-                    continue
-                if task.state == "PLANNING" and not task.commands:
-                    changed = replace(task, state="BLOCKED", reason_code="REVALIDATION_REQUIRED",
-                                      resume_phase="PLANNING", version=task.version + 1)
-                    await self._persist(tx, ChangeSet(changed))
-                    await tx.append_event(task.task_id, TaskEvent("planning_interrupted", {"reason_code": changed.reason_code}))
-                    await self._release_unstarted(tx, changed)
-                    continue
-                change = uncertain_execution(task)
-                if change.task != task:
-                    await self._persist(tx, change)
-                    await tx.append_event(task.task_id, TaskEvent("result_unknown", {"reason_code": "RESULT_UNKNOWN"}))
+                await self._abandon_task(
+                    tx, task, "COMMAND_CONNECTION_LOST" if stored["enabled"] else "ROBOT_DISABLED")
             await tx.update_observations(binding, generation, {"connected": False})
         await self._cancel_invalid_planning()
 
@@ -1296,11 +1365,12 @@ class TaskService:
             latest = await tx.approvals(current)
             if latest != approvals:
                 return denied("APPROVAL_CHANGED")
-            if check.records[-1].detail["base_result"] == "require_confirmation" and not any(approval_covers(
+            if (check.records[-1].detail["base_result"] == "require_confirmation"
+                    and not current.plan.approval_bypass and not any(approval_covers(
                     evidence, customer_id=task.customer_id, plan_id=task.plan.plan_id, revision=task.plan.revision,
                     scope=tuple(step.step_id for step in task.plan.steps), policy_version=self.policy.version,
                     now=datetime.now(timezone.utc), require_fresh=not plan_has_started(current))
-                    for evidence in latest):
+                    for evidence in latest)):
                 return denied("AUTHORIZATION_REQUIRED")
             if check.records[-1].rule_or_policy_version != self.policy.version:
                 return denied("APPROVAL_CHANGED")
@@ -1371,6 +1441,15 @@ class TaskService:
                 return self.empty_conversation_view(task_id, can_message=await self.policy.can_control(context, owner))
             if not await self._can_view_task(context, tx, task):
                 raise NotFoundError(task_id)
+            return await self.view_in_transaction(tx, task)
+
+    async def get_turn(self, context, task_id, turn_id):
+        """Read one admitted turn, never the conversation's newer replacement."""
+        async with self.store.unit_of_work(context) as tx:
+            task = await tx.load_task(turn_id, actor_scope=False)
+            if ((task.conversation_id or task.task_id) != task_id
+                    or not await self._can_view_task(context, tx, task)):
+                raise NotFoundError("object not found")
             return await self.view_in_transaction(tx, task)
 
     async def request_result(self, context, request_key):

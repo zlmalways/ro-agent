@@ -44,6 +44,18 @@ def _record_observations(observations, generation, frame):
             observations[key] = evidence
 
 
+def is_storage_connection_error(exc):
+    """Return whether an error means the database connection is unavailable.
+
+    Statement-level failures (including PostgreSQL query cancellation) belong to
+    the current operation.  They must not take the whole scheduler offline.
+    PostgreSQL connection failures use SQLSTATE class 08.
+    """
+    if isinstance(exc, (OSError, asyncpg.InterfaceError, asyncpg.InternalClientError)):
+        return True
+    return isinstance(exc, asyncpg.PostgresError) and str(getattr(exc, "sqlstate", "")).startswith("08")
+
+
 class PostgresStore:
     def __init__(self, pool, *, deployment_id):
         self.pool = pool
@@ -86,13 +98,26 @@ class PostgresStore:
             raise
 
     def _storage_failed(self, exc):
-        # Authorization errors raised by a business operation inside the context
-        # also inherit OSError; they are not evidence of a broken database.
+        # A cancelled or rejected statement is not a disconnected database.
+        # Keep the global scheduler available for those operation-local errors.
         if isinstance(exc, PermissionError):
             return
-        self.write_available = False
         logging.getLogger(__name__).error("storage access failed: type=%s sqlstate=%s",
                                          type(exc).__name__, getattr(exc, "sqlstate", ""))
+        if is_storage_connection_error(exc):
+            self.write_available = False
+
+    async def probe_connection(self):
+        """Probe only after a connection failure; success explicitly recovers storage."""
+        try:
+            async with self.pool.acquire() as connection:
+                await connection.execute("SELECT 1")
+        except (OSError, asyncpg.PostgresError, asyncpg.InterfaceError,
+                asyncpg.InternalClientError) as exc:
+            self._storage_failed(exc)
+            return False
+        self.write_available = True
+        return True
 
     async def conversation_messages(self, customer_id, conversation_id):
         """Read the durable chat history for one customer conversation."""
@@ -125,6 +150,11 @@ class PostgresStore:
                                      response_json=response_json, response_text=response_text,
                                      http_status=http_status,
                                      provider_request_id=provider_request_id)
+
+    async def cancel_llm_call(self, customer_id, llm_call_id, **result):
+        """Close an interrupted call without overwriting an already saved result."""
+        async with self.system_unit_of_work() as tx:
+            return await tx.cancel_llm_call(customer_id, llm_call_id, **result)
 
     async def migrate(self):
         migrations = Path(__file__).resolve().parents[3] / "db/migrations"
@@ -284,6 +314,14 @@ class TaskTransaction:
         """, customer_id, llm_call_id, turn_id, attempt_no, provider, model,
             endpoint, _json(request_json))
 
+    async def mark_llm_output_invalid(self, customer_id, llm_call_id, turn_id):
+        self._check_customer(customer_id)
+        # Parsing may succeed before plan-content validation fails. Preserve the
+        # exact response and timestamps; the linked task event records the reason.
+        await self.connection.execute("""UPDATE ra_llm_calls SET status='FAILED'
+            WHERE customer_id=$1 AND llm_call_id=$2 AND turn_id=$3 AND status='SUCCEEDED'""",
+            customer_id, llm_call_id, turn_id)
+
     async def finish_llm_call(self, customer_id, llm_call_id, *, status,
                               response_json=None, response_text=None, http_status=None,
                               provider_request_id=None):
@@ -302,6 +340,24 @@ class TaskTransaction:
             customer_id, llm_call_id)
         if result != "UPDATE 1":
             raise ConflictError("llm call is missing or already finished")
+
+    async def cancel_llm_call(self, customer_id, llm_call_id, *,
+                              response_json=None, response_text=None, http_status=None,
+                              provider_request_id=None):
+        self._check_customer(customer_id)
+        # Cancellation can race with the initial insert or the final commit.
+        # A rolled-back insert and an already finished row both need no update.
+        result = await self.connection.execute("""
+            UPDATE ra_llm_calls
+            SET status='CANCELLED', finished_at=clock_timestamp(),
+                response_json=coalesce($1::jsonb,response_json),
+                response_text=coalesce($2,response_text),
+                http_status=coalesce($3,http_status),
+                provider_request_id=coalesce($4,provider_request_id)
+            WHERE customer_id=$5 AND llm_call_id=$6 AND status='STARTED'
+        """, _json(response_json) if response_json is not None else None,
+            response_text, http_status, provider_request_id, customer_id, llm_call_id)
+        return result == "UPDATE 1"
 
     async def create_conversation(self, customer_id, conversation_id, actor_kind, actor_id):
         self._check_customer(customer_id, actor_id, actor_kind)
@@ -498,7 +554,8 @@ class TaskTransaction:
             snapshot = _snapshot(json.loads(record["snapshot"]))
             steps = tuple(PlanStep(item["step_id"], item["action"], item["args"], tuple(item["depends_on"]),
                                    tuple(item["source_refs"])) for item in json.loads(record["steps"]))
-            plan = Plan(record["plan_id"], record["revision"], steps, snapshot.snapshot_id)
+            plan = Plan(record["plan_id"], record["revision"], steps, snapshot.snapshot_id,
+                        record["approval_bypass"], record["approval_bypass_version"])
         if row["active_plan_id"]:
             records = await self.connection.fetch("SELECT * FROM ra_commands WHERE customer_id=$1 AND task_id=$2 AND plan_id=$3"
                                                    " ORDER BY created_at,command_id", row["customer_id"], task_id,
@@ -548,7 +605,9 @@ class TaskTransaction:
                 steps_json, snapshot_json = _json([asdict(step) for step in task.plan.steps]), _json(asdict(task.snapshot))
                 if stored and (stored["task_id"] != task.task_id or stored["revision"] != task.plan.revision
                                or json.loads(stored["steps"]) != json.loads(steps_json)
-                               or json.loads(stored["snapshot"]) != json.loads(snapshot_json)):
+                               or json.loads(stored["snapshot"]) != json.loads(snapshot_json)
+                               or stored["approval_bypass"] != task.plan.approval_bypass
+                               or stored["approval_bypass_version"] != task.plan.approval_bypass_version):
                     raise ConflictError("plan version is immutable")
             status = await self.connection.execute("""UPDATE ra_tasks SET state=$1,reason_code=$2,active_plan_id=$3,
                 completed=$4,clarification=$5,result_disputed=$6,cancel_requested=$7,resume_phase=$8,version=$9,updated_at=clock_timestamp(),
@@ -568,8 +627,10 @@ class TaskTransaction:
             if task.plan:
                 if not stored:
                     await self.connection.execute("""INSERT INTO ra_plans
-                        (customer_id,plan_id,task_id,revision,steps,snapshot) VALUES ($1,$2,$3,$4,$5::jsonb,$6::jsonb)""",
-                        task.customer_id, task.plan.plan_id, task.task_id, task.plan.revision, steps_json, snapshot_json)
+                        (customer_id,plan_id,task_id,revision,steps,snapshot,approval_bypass,approval_bypass_version)
+                        VALUES ($1,$2,$3,$4,$5::jsonb,$6::jsonb,$7,$8)""",
+                        task.customer_id, task.plan.plan_id, task.task_id, task.plan.revision, steps_json, snapshot_json,
+                        task.plan.approval_bypass, task.plan.approval_bypass_version)
                 next_step = next((step.step_id for step in task.plan.steps
                                   if step.step_id not in task.completed and step.step_id not in task.skipped_steps), None)
                 await self.connection.execute("""INSERT INTO ra_units
@@ -753,6 +814,16 @@ class SystemTaskTransaction(TaskTransaction):
             VALUES ($1,$2,$3,$4,$5,true)""", value["customer_id"], value["binding_id"], value["wire_robot_id"],
             value["token_env"], list(value["allowed_actions"]))
 
+    async def set_approval_bypass(self, context, binding_id, enabled, expected_version):
+        row = await self.connection.fetchrow("""UPDATE ra_robot_bindings
+            SET approval_bypass=$3,approval_bypass_version=approval_bypass_version+1,
+                approval_bypass_updated_by=$4,approval_bypass_updated_at=clock_timestamp()
+            WHERE customer_id=$1 AND binding_id=$2 AND approval_bypass_version=$5
+            RETURNING *""", context.customer_id, binding_id, enabled, context.actor_id, expected_version)
+        if row is None:
+            raise ConflictError("ROBOT_APPROVAL_SETTINGS_CHANGED")
+        return dict(row)
+
     async def customer_bindings(self, customer_id, *, include_disabled=False):
         rows = await self.connection.fetch("SELECT * FROM ra_robot_bindings WHERE customer_id=$1 AND ($2 OR enabled=true) ORDER BY binding_id",
                                            customer_id, include_disabled)
@@ -793,7 +864,13 @@ class SystemTaskTransaction(TaskTransaction):
             return
         observations = json.loads(stored["observations"])
         _record_observations(observations, generation, frame)
-        await self.connection.execute("""UPDATE ra_robot_bindings SET observations=$1::jsonb,version=version+1
+        # Readiness/telemetry is live evidence, not a change to the execution
+        # context.  ``version`` is used by planning/dispatch revalidation and
+        # must only move when capabilities, policy, resources, or connection
+        # generation change.  Advancing it for every heartbeat made a normal
+        # readiness frame race the dispatch check and produce a false
+        # REVALIDATION_REQUIRED block.
+        await self.connection.execute("""UPDATE ra_robot_bindings SET observations=$1::jsonb
             WHERE customer_id=$2 AND binding_id=$3 AND connection_generation=$4""", _json(observations),
             binding["customer_id"], binding["binding_id"], generation)
 
