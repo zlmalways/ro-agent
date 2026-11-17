@@ -14,7 +14,8 @@ from robot_agent.api.robot_ws import router as robot_router
 from robot_agent.api.tasks import router as tasks_router
 from robot_agent.api.voice import router as voice_router
 from robot_agent.domain.models import DependencyUnavailable, PreflightBlocked
-from robot_agent.domain.errors import make_error
+from robot_agent.domain.errors import MESSAGES, make_error
+from robot_agent.adapters.postgres import is_storage_connection_error
 
 
 def create_app(*, service=None, identity=None, resources=None, inputs=None):
@@ -54,7 +55,12 @@ def create_app(*, service=None, identity=None, resources=None, inputs=None):
     @app.exception_handler(asyncpg.InternalClientError)
     @app.exception_handler(OSError)
     async def persistence_error(request: Request, exc):
-        error = make_error("PERSISTENCE_UNCONFIRMED", source="runtime", phase="persistence")
+        runtime = getattr(request.app.state, "runtime", None)
+        code = ("DATABASE_UNAVAILABLE"
+                if getattr(runtime, "error", "") == "DATABASE_UNAVAILABLE"
+                or is_storage_connection_error(exc)
+                else "PERSISTENCE_UNCONFIRMED")
+        error = make_error(code, source="runtime", phase="persistence")
         return JSONResponse(status_code=503, content={"detail": error["code"], "error": error})
 
     @app.get("/api/robot-agent/session")
@@ -69,7 +75,16 @@ def create_app(*, service=None, identity=None, resources=None, inputs=None):
         runtime = getattr(app.state, "runtime", None)
         if runtime is not None:
             ready = ready and not runtime.error and runtime.loop_task is not None and not runtime.loop_task.done()
+        status = {"configured": ready,
+                  "execution_enabled": getattr(app.state, "execution_enabled", False) and ready}
+        if runtime is not None and runtime.error == "DATABASE_UNAVAILABLE":
+            status["error"] = {
+                "code": "DATABASE_UNAVAILABLE", "message": MESSAGES["DATABASE_UNAVAILABLE"],
+                "probe_attempt": runtime.db_probe_count,
+                "probe_limit": runtime.db_probe_attempts,
+                "probe_exhausted": runtime.db_probe_exhausted,
+            }
         return JSONResponse(status_code=200 if ready else 503,
-                            content={"configured": ready, "execution_enabled": getattr(app.state, "execution_enabled", False) and ready})
+                            content=status)
 
     return app

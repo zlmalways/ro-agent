@@ -1,0 +1,30 @@
+{
+  "project_directory": "D:\\codex_chat\\2026-10-25\\new-chat\\ro-agent-mac-recovery",
+  "python": "D:\\ro-agent-data\\runtime\\pcm-platform-20261105\\Scripts\\python.exe",
+  "application_config": "D:\\codex_chat\\2026-10-25\\new-chat\\ro-agent-mac-recovery\\config\\dev.local.json",
+  "http": {
+    "host": "127.0.0.1",
+    "port": 18764
+  },
+  "postgresql": {
+    "bin_directory": "D:\\ro-agent-data\\runtime\\pgsql\\bin",
+    "data_directory": "D:\\codex_chat\\2026-10-25\\new-chat\\ro-agent-mac-recovery\\test-db\\pgdata",
+    "log_file": "D:\\codex_chat\\2026-10-25\\new-chat\\ro-agent-mac-recovery\\test-db\\postgresql.log",
+    "host": "127.0.0.1",
+    "port": 55440,
+    "database": "ro_agent_sim_test",
+    "user": "ro_agent_sim_test",
+    "password_file": "D:\\codex_chat\\2026-10-25\\new-chat\\ro-agent-mac-recovery\\test-db\\private\\db-password",
+    "admin_password_file": "D:\\codex_chat\\2026-10-25\\new-chat\\ro-agent-mac-recovery\\test-db\\private\\admin-password",
+    "admin_user": "postgres"
+  },
+  "credentials": {
+    "RO_AGENT_TEST_USER_TOKEN": "D:\\codex_chat\\2026-10-25\\new-chat\\ro-agent-mac-recovery\\test-db\\private\\user-token",
+    "RO_AGENT_TEST_REAL_ROBOT_TOKEN": "D:\\codex_chat\\2026-10-25\\new-chat\\ro-agent-mac-recovery\\test-db\\private\\real-robot-token",
+    "RO_AGENT_TEST_SIM_ROBOT_TOKEN": "D:\\codex_chat\\2026-10-25\\new-chat\\ro-agent-mac-recovery\\test-db\\private\\sim-robot-token"
+  },
+  "version": 1,
+  "environment": "test",
+  "log_directory": "D:\\codex_chat\\2026-10-25\\new-chat\\ro-agent-mac-recovery\\test-db\\logs",
+  "application_overrides": {}
+}

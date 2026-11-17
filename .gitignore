@@ -13,3 +13,4 @@ dist/
 /test-db/
 /config/dev.local.json
 /config/dev.e2e.local.json
+/config/formal-runtime.local.json

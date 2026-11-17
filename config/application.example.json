@@ -1,0 +1,103 @@
+{
+  "database": {
+    "dsn_env": "RO_AGENT_TEST_DATABASE_URL",
+    "schema": "public"
+  },
+  "deployment": {
+    "id": "local-sim-test",
+    "execution_enabled": true,
+    "host_id": "zlm",
+    "lock_path": "D:\\codex_chat\\2026-10-25\\new-chat\\ro-agent-mac-recovery\\test-db\\execution.lock",
+    "advisory_key": 6011061887301
+  },
+  "allow_external_calls": true,
+  "credentials_file": "C:\\Users\\14010\\AppData\\Local\\Packages\\OpenAI.Codex_2p2nqsd0c76g0\\LocalCache\\Local\\ro-agent-formal\\secrets.json",
+  "llm": {
+    "provider": "relay"
+  },
+  "voice_asr": {
+    "provider": "openai",
+    "mode": "file",
+    "model": "gpt-transcribe",
+    "timeout_seconds": 90
+  },
+  "users": [
+    {
+      "customer_id": "local-development",
+      "actor_id": "zenglingming",
+      "roles": [
+        "user",
+        "maintainer",
+        "approver"
+      ],
+      "token_env": "RO_AGENT_TEST_USER_TOKEN"
+    }
+  ],
+  "robots": [
+    {
+      "customer_id": "local-development",
+      "binding_id": "astribot-command-binding",
+      "wire_robot_id": "001cmd",
+      "token_env": "RO_AGENT_TEST_REAL_ROBOT_TOKEN",
+      "allowed_actions": [
+        "move_to",
+        "vla_skill"
+      ],
+      "voice_wire_robot_id": "001"
+    },
+    {
+      "customer_id": "local-development",
+      "binding_id": "pcm-mock-fridge-binding",
+      "wire_robot_id": "mock-fridge-01",
+      "voice_wire_robot_id": "mock-fridge-01-voice",
+      "token_env": "RO_AGENT_TEST_SIM_ROBOT_TOKEN",
+      "allowed_actions": [
+        "move_to",
+        "vla_skill"
+      ]
+    }
+  ],
+  "policy": {
+    "version": "v11-skills-approval-20261105",
+    "approval_ttl_seconds": 120,
+    "actions": {
+      "local-development": {
+        "move_to": "require_confirmation",
+        "vla_skill": "require_confirmation"
+      },
+      "pcm-simulator": {
+        "move_to": "require_confirmation",
+        "vla_skill": "deny"
+      }
+    }
+  },
+  "resources": {
+    "use_reported_waypoints": true
+  },
+  "limits": {
+    "freshness_seconds": 10,
+    "max_resource_entries": 100,
+    "max_audio_bytes": 2000000,
+    "max_frame_bytes": 3000000,
+    "max_text_chars": 2000,
+    "max_plan_steps": 12,
+    "provider_response_bytes": 2000000,
+    "scan_interval": 0.2,
+    "command_timeout": 240
+  },
+  "voice_wake": {
+    "wake_word": "小千小千",
+    "aliases": [
+      "小千",
+      "小钱小钱",
+      "小芊小芊"
+    ],
+    "followup_seconds": 10
+  },
+  "voice_pcm": {
+    "enabled": true,
+    "evaluate_wake": false,
+    "submit_tasks": true,
+    "wav_save_dir": "D:/ro-agent-data/testdata/recordings"
+  }
+}

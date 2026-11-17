@@ -9,6 +9,7 @@ from uuid import uuid4
 
 import asyncpg
 from robot_agent.domain.models import DependencyUnavailable, PreflightBlocked
+from robot_agent.adapters.postgres import is_storage_connection_error
 
 
 _OWNERSHIP_ERRORS = (OSError, asyncpg.PostgresError, asyncpg.InterfaceError, asyncpg.InternalClientError)
@@ -131,9 +132,17 @@ class RuntimeOwnership:
                 self.file.close()
                 self.file = None
 
+    async def reconnect(self):
+        """Recreate the ownership connection after a database disconnect."""
+        await self.close()
+        self.disabled = False
+        self.attempted = False
+        return await self.acquire()
+
 
 class Runtime:
-    def __init__(self, *, owner, service, deployment_id, scan_interval):
+    def __init__(self, *, owner, service, deployment_id, scan_interval,
+                 db_probe_interval=5.0, db_probe_attempts=5):
         self.owner = owner
         self.service = service
         self.deployment_id = deployment_id
@@ -141,6 +150,33 @@ class Runtime:
         self.stopping = asyncio.Event()
         self.loop_task = None
         self.error = ""
+        self.db_probe_interval = float(db_probe_interval)
+        self.db_probe_attempts = int(db_probe_attempts)
+        self.db_probe_count = 0
+        self.db_probe_exhausted = False
+
+    async def _probe_database_after_disconnect(self):
+        self.db_probe_count = 0
+        self.db_probe_exhausted = False
+        for attempt in range(1, self.db_probe_attempts + 1):
+            try:
+                await asyncio.wait_for(self.stopping.wait(), self.db_probe_interval)
+                return False
+            except asyncio.TimeoutError:
+                pass
+            self.db_probe_count = attempt
+            if await self.service.store.probe_connection():
+                if self.owner is not None and self.owner.disabled:
+                    if not await self.owner.reconnect():
+                        self.error = "OWNERSHIP_UNAVAILABLE"
+                        return False
+                self.error = ""
+                self.db_probe_count = 0
+                return True
+            logging.getLogger(__name__).warning(
+                "database probe failed attempt=%s/%s", attempt, self.db_probe_attempts)
+        self.db_probe_exhausted = True
+        return False
 
     async def start(self):
         if self.owner is not None:
@@ -153,7 +189,19 @@ class Runtime:
 
     async def _run(self):
         try:
-            while not self.stopping.is_set() and (self.owner is None or await self.owner.healthy()):
+            while not self.stopping.is_set():
+                # Ownership uses its own PostgreSQL connection.  A database
+                # outage can therefore be observed here before the scheduler
+                # reaches a store transaction; route it through the same
+                # bounded probe/reconnect path instead of silently ending the
+                # runtime loop.
+                if self.owner is not None and not await self.owner.healthy():
+                    self.error = "DATABASE_UNAVAILABLE"
+                    if await self._probe_database_after_disconnect():
+                        continue
+                    if self.owner is not None:
+                        self.owner._disable()
+                    return
                 try:
                     await self.service.expire_commands(self.deployment_id)
                     self.service.raise_background_error()
@@ -163,8 +211,15 @@ class Runtime:
                 except (DependencyUnavailable, PreflightBlocked) as exc:
                     self.error = type(exc).__name__
                     logging.getLogger(__name__).warning("runtime dependency unavailable: %s", self.error)
-                except (OSError, asyncpg.PostgresError, asyncpg.InterfaceError):
-                    self.error = "STORAGE_UNAVAILABLE"
+                except (OSError, asyncpg.PostgresError, asyncpg.InterfaceError,
+                        asyncpg.InternalClientError) as exc:
+                    if not is_storage_connection_error(exc):
+                        logging.getLogger(__name__).exception(
+                            "runtime operation failed without a database disconnect")
+                        continue
+                    self.error = "DATABASE_UNAVAILABLE"
+                    if await self._probe_database_after_disconnect():
+                        continue
                     if self.owner is not None:
                         self.owner._disable()
                     return

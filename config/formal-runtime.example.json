@@ -1,0 +1,92 @@
+{
+  "version": 1,
+  "environment": "formal",
+  "python": "D:\\ro-agent-data\\runtime\\pcm-platform-20261105\\Scripts\\python.exe",
+  "application_config": "dev.local.json",
+  "log_directory": "D:/ro-agent-data/logs/formal",
+  "http": {
+    "host": "0.0.0.0",
+    "port": 18763
+  },
+  "postgresql": {
+    "bin_directory": "D:\\ro-agent-data\\runtime\\pgsql\\bin",
+    "data_directory": "D:\\ro-agent-data\\data\\pgdata",
+    "host": "127.0.0.1",
+    "port": 55439,
+    "database": "ro_agent_formal",
+    "user": "ro_agent_formal",
+    "admin_user": "sim_admin",
+    "admin_password_file": "C:\\Users\\14010\\AppData\\Local\\Packages\\OpenAI.Codex_2p2nqsd0c76g0\\LocalCache\\Local\\ro-agent-simulator\\config\\pg-password",
+    "log_file": "D:\\ro-agent-data\\logs\\postgres.log",
+    "password_file": null
+  },
+  "credentials": {},
+  "application_overrides": {
+    "database": {
+      "dsn_env": "RO_AGENT_DATABASE_URL"
+    },
+    "deployment": {
+      "id": "local-formal-astribot",
+      "execution_enabled": true,
+      "host_id": "zlm",
+      "lock_path": "C:\\Users\\14010\\AppData\\Local\\Packages\\OpenAI.Codex_2p2nqsd0c76g0\\LocalCache\\Local\\ro-agent-formal\\execution.lock",
+      "advisory_key": 6519161496507849959
+    },
+    "users": [
+      {
+        "customer_id": "local-development",
+        "actor_id": "zenglingming",
+        "roles": [
+          "user",
+          "maintainer",
+          "approver"
+        ],
+        "token_env": "RO_AGENT_USER_TOKEN"
+      }
+    ],
+    "robots": [
+      {
+        "customer_id": "local-development",
+        "binding_id": "astribot-command-binding",
+        "wire_robot_id": "001cmd",
+        "token_env": "RO_AGENT_REAL_ROBOT_TOKEN",
+        "allowed_actions": [
+          "move_to",
+          "vla_skill"
+        ],
+        "voice_wire_robot_id": "001"
+      },
+      {
+        "customer_id": "local-development",
+        "binding_id": "pcm-mock-fridge-binding",
+        "wire_robot_id": "mock-fridge-01",
+        "voice_wire_robot_id": "mock-fridge-01-voice",
+        "token_env": "PCM_SIMULATOR_ROBOT_TOKEN",
+        "allowed_actions": [
+          "move_to",
+          "vla_skill"
+        ]
+      }
+    ],
+    "voice_pcm": {
+      "evaluate_wake": true,
+      "wav_save_dir": "D:/ro-agent-data/recordings/formal"
+    },
+    "credentials_file": "C:\\Users\\14010\\AppData\\Local\\Packages\\OpenAI.Codex_2p2nqsd0c76g0\\LocalCache\\Local\\ro-agent-formal\\secrets.json",
+    "policy": {
+      "version": "v11-skills-approval-20261105",
+      "approval_ttl_seconds": 120,
+      "actions": {
+        "local-development": {
+          "move_to": "require_confirmation",
+          "vla_skill": "require_confirmation"
+        },
+        "pcm-simulator": {
+          "move_to": "require_confirmation",
+          "vla_skill": "deny"
+        }
+      }
+    },
+    "allow_external_calls": true
+  }
+}
