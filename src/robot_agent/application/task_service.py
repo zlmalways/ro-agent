@@ -5,11 +5,12 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from hashlib import sha256
 import json
+import logging
 from uuid import NAMESPACE_URL, uuid4, uuid5
 
 from robot_agent.domain.models import (
     ChangeSet, ConflictError, Decision, DependencyUnavailable, ModelOutputError, NotFoundError, Plan, PlanError,
-    PlanningRepair, PreflightBlocked, RobotAllocation, SendObservation, Task, TaskEvent, TaskView, TrustedContext,
+    PlanningRepair, PreflightBlocked, ReadinessBlocked, RobotAllocation, SendObservation, Task, TaskEvent, TaskView, TrustedContext,
 )
 from robot_agent.domain.errors import error_code, make_error, public_error, stop_task
 from robot_agent.domain.conversation import conversation_interaction
@@ -545,6 +546,16 @@ class TaskService:
                     raise PlanError("PLANNER_REPAIR_FAILED", source="planning", phase="planning") from exc
                 repair = PlanningRepair(raw_output, exc.feedback)
 
+    async def _check_plan(self, task, context, candidate, snapshot, phase, approvals=(), **options):
+        try:
+            return await self.preflight.check(context, candidate, snapshot, phase, approvals, **options)
+        except ReadinessBlocked as exc:
+            logging.getLogger(__name__).warning("READINESS_UNKNOWN %s", json.dumps({
+                "error_id": exc.error_id, "conversation_id": task.conversation_id or task.task_id,
+                "turn_id": task.task_id, "turn_seq": task.turn_seq, "phase": phase, **exc.details,
+            }, ensure_ascii=False))
+            raise
+
     async def _generate_plan(self, task, snapshot, *, work):
         context = TrustedContext(task.customer_id, task.actor_kind, task.actor_id)
         records = ()
@@ -565,7 +576,7 @@ class TaskService:
                 changed = replace(task, state="REPLIED", reason_code="", clarification="", clarification_id="")
                 assistant_message = ("reply", candidate.reason or "当前能力无法完成这个任务。")
             else:
-                check = await self.preflight.check(context, candidate, snapshot, "planning")
+                check = await self._check_plan(task, context, candidate, snapshot, "planning")
                 state = {"allow": "READY", "deny": "FAILED", "require_confirmation": "WAITING_APPROVAL",
                          "unavailable": "BLOCKED"}[check.authorization]
                 changed = replace(task, state=state, reason_code="" if state == "READY" else "AUTHORIZATION_" + check.authorization.upper(),
@@ -723,8 +734,8 @@ class TaskService:
         snapshot = await self.resources.snapshot(context, task.snapshot.robot_binding_id)
         if snapshot.readiness.get("busy") is not False:
             raise PreflightBlocked("ROBOT_STATE_UNKNOWN")
-        check = await self.preflight.check(
-            context, task.plan, snapshot, "dispatch", approvals,
+        check = await self._check_plan(
+            task, context, task.plan, snapshot, "dispatch", approvals,
             require_fresh_approval=not plan_has_started(task),
         )
         if check.authorization != "allow":
@@ -938,8 +949,8 @@ class TaskService:
             approvals = await tx.approvals(task)
         try:
             snapshot = await self.resources.snapshot(context, task.snapshot.robot_binding_id)
-            check = await self.preflight.check(
-                context, task.plan, snapshot, "dispatch", approvals,
+            check = await self._check_plan(
+                task, context, task.plan, snapshot, "dispatch", approvals,
                 require_fresh_approval=not plan_has_started(task),
             )
         except (PlanError, PreflightBlocked, DependencyUnavailable, PermissionError) as exc:
@@ -999,8 +1010,8 @@ class TaskService:
             approvals = await tx.approvals(task)
         try:
             snapshot = await self.resources.snapshot(context, task.snapshot.robot_binding_id)
-            check = await self.preflight.check(
-                context, task.plan, snapshot, "dispatch", approvals,
+            check = await self._check_plan(
+                task, context, task.plan, snapshot, "dispatch", approvals,
                 require_fresh_approval=not plan_has_started(task),
             )
         except (PlanError, PreflightBlocked, DependencyUnavailable, PermissionError) as exc:
@@ -1070,7 +1081,8 @@ class TaskService:
             elif not observation.sent and stored.outcome not in {"SUCCEEDED", "FAILED"}:
                 reason = error_code(observation.reason_code, "SEND_FAILED" if observation.may_have_sent else "SEND_NOT_ATTEMPTED")
                 state = task.state if task.state in (TERMINAL_TASK_STATES | {"CANCEL_REQUESTED"}) else "BLOCKED"
-                changed = stop_task(replace(changed, state=state, reason_code=task.reason_code or reason), reason,
+                changed = stop_task(replace(changed, state=state, reason_code=task.reason_code or reason),
+                                    observation.readiness_failure or reason,
                                     source=observation.source, phase="write", command=updated)
             await self._persist(tx, ChangeSet(changed, updated))
             await tx.append_event(task.task_id, TaskEvent("send_observed", {
@@ -1170,7 +1182,7 @@ class TaskService:
                             "policy_version": self.policy.version, "issued_at": now, "expires_at": now + timedelta(seconds=ttl),
                             "revoked_at": None}
                 snapshot = await self.resources.snapshot(context, task.snapshot.robot_binding_id)
-                check = await self.preflight.check(context, task.plan, snapshot, "approval", approvals + [evidence])
+                check = await self._check_plan(task, context, task.plan, snapshot, "approval", approvals + [evidence])
                 state = "READY" if check.authorization == "allow" else "BLOCKED"
                 reason = "" if state == "READY" else "AUTHORIZATION_" + check.authorization.upper()
                 records = check.records + (Decision(str(uuid4()), "approval", "approve", self.policy.version, detail=evidence),)
@@ -1319,7 +1331,8 @@ class TaskService:
     async def may_write(self, command):
         def denied(reason, source=""):
             failure = make_error(reason, source=source, phase="write")
-            return SendObservation(False, False, failure["code"], failure["source"])
+            return SendObservation(False, False, failure["code"], failure["source"],
+                                   readiness_failure=reason if isinstance(reason, ReadinessBlocked) else None)
 
         if not getattr(self.store, "write_available", True):
             return denied("PERSISTENCE_UNCONFIRMED")
@@ -1341,8 +1354,8 @@ class TaskService:
         context = TrustedContext(task.customer_id, task.actor_kind, task.actor_id)
         try:
             snapshot = await self.resources.snapshot(context, command.robot_binding_id)
-            check = await self.preflight.check(
-                context, task.plan, snapshot, "write", approvals,
+            check = await self._check_plan(
+                task, context, task.plan, snapshot, "write", approvals,
                 require_fresh_approval=not plan_has_started(task),
             )
         except (PlanError, PreflightBlocked, DependencyUnavailable, PermissionError) as exc:

@@ -4,8 +4,40 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from uuid import uuid4
 
-from robot_agent.domain.models import CandidatePlan, CandidateStep, Decision, Plan, PlanError, PreflightBlocked, ValidationResult
+from robot_agent.domain.models import CandidatePlan, CandidateStep, Decision, Plan, PlanError, PreflightBlocked, ReadinessBlocked, ValidationResult
 from robot_agent.domain.validation import validate_plan
+
+
+_MISSING = object()
+
+
+def _readiness_failure(snapshot, step, field, expected):
+    evidence = snapshot.readiness_evidence.get(field) or {}
+    actual = snapshot.readiness.get(field, _MISSING)
+    age = None
+    if snapshot.captured_at and evidence.get("received_at"):
+        age = (datetime.fromisoformat(snapshot.captured_at)
+               - datetime.fromisoformat(evidence["received_at"])).total_seconds()
+    if actual is not _MISSING:
+        category = "reported_not_ready"
+    elif (evidence.get("connection_generation") == snapshot.generation
+          and age is not None and snapshot.freshness_seconds is not None and age > snapshot.freshness_seconds):
+        category = "report_expired"
+    else:
+        category = "no_valid_current_report"
+    return {
+        "category": category,
+        "field": field,
+        "expected": expected,
+        "actual": None if actual is _MISSING else actual,
+        "reported_value": evidence.get("value"),
+        "reported_at": evidence.get("received_at"),
+        "reported_generation": evidence.get("connection_generation"),
+        "age_seconds_at_capture": age,
+        "step_id": step.step_id,
+        "action": step.action,
+        "target": step.args.get("location") if step.action == "move_to" else step.args.get("skill_id"),
+    }
 
 
 @dataclass(frozen=True)
@@ -46,12 +78,22 @@ class Preflight:
         validated = validate_plan(value, snapshot, self.catalog)
         if plan and validated.steps != plan.steps:
             raise PreflightBlocked("RESOURCE_VERSION_CHANGED")
+        readiness_failures = []
         for step in validated.steps:
             if step.action == "move_to" and snapshot.readiness.get("nav_server_ready") is not True:
-                raise PreflightBlocked("READINESS_UNKNOWN")
-            if step.action == "vla_skill" and (snapshot.readiness.get("brain_server_ready") is not True
-                                              or snapshot.readiness.get("brain_engine") != "ready"):
-                raise PreflightBlocked("READINESS_UNKNOWN")
+                readiness_failures.append(_readiness_failure(snapshot, step, "nav_server_ready", True))
+            if step.action == "vla_skill":
+                if snapshot.readiness.get("brain_server_ready") is not True:
+                    readiness_failures.append(_readiness_failure(snapshot, step, "brain_server_ready", True))
+                if snapshot.readiness.get("brain_engine") != "ready":
+                    readiness_failures.append(_readiness_failure(snapshot, step, "brain_engine", "ready"))
+        if readiness_failures:
+            raise ReadinessBlocked(error_id=str(uuid4()), phase=phase, details={
+                "checks": readiness_failures, "robot_binding_id": snapshot.robot_binding_id,
+                "current_generation": snapshot.generation, "captured_at": snapshot.captured_at,
+                "freshness_seconds": snapshot.freshness_seconds,
+                "checked_at": datetime.now(timezone.utc).isoformat(),
+            })
         result = await self.policy.evaluate(context, candidate, list(approvals))
         if result not in {"allow", "deny", "require_confirmation", "unavailable"}:
             result = "unavailable"

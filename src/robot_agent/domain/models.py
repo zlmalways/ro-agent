@@ -45,6 +45,13 @@ class PreflightBlocked(ModuleFailure, ValueError):
     pass
 
 
+class ReadinessBlocked(PreflightBlocked):
+    def __init__(self, *, error_id, phase, details):
+        super().__init__("READINESS_UNKNOWN", source="resources", phase=phase)
+        self.error_id = error_id
+        self.details = details
+
+
 @dataclass(frozen=True)
 class TrustedContext:
     customer_id: str
@@ -154,6 +161,8 @@ class ContextSnapshot:
     environment_labels: Mapping[str, str] = field(default_factory=dict)
     binding_version: int = 0
     valid_until: datetime | None = None
+    captured_at: str | None = None
+    freshness_seconds: float | None = None
 
 
 @dataclass(frozen=True)
@@ -250,6 +259,7 @@ class SendObservation:
     may_have_sent: bool = True
     reason_code: str = ""
     source: str = "transport"
+    readiness_failure: ReadinessBlocked | None = field(default=None, compare=False, repr=False)
 
     def __bool__(self):
         return self.sent

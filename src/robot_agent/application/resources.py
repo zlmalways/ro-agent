@@ -201,7 +201,8 @@ class Resources:
         return ContextSnapshot(context.customer_id, binding["binding_id"], generation, skills, waypoints, skill_refs,
                                readiness, str(uuid4()), frozenset(binding["allowed_capabilities"]), observations,
                                capability["entries"] if capability else {}, environment_labels, binding["version"],
-                               min(deadlines) if deadlines else None)
+                               min(deadlines) if deadlines else None,
+                               captured_at=now.isoformat(), freshness_seconds=self.freshness_seconds)
 
     async def list_robots(self, context):
         async with self.store.system_unit_of_work() as tx:

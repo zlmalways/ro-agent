@@ -4,6 +4,8 @@ from dataclasses import replace
 from datetime import datetime, timezone
 from uuid import uuid4
 
+from robot_agent.domain.models import ReadinessBlocked
+
 
 # Only these authored messages cross the API boundary. Provider/robot exception
 # text stays in its source exception or recorded robot evidence, never in a view.
@@ -128,7 +130,8 @@ def make_error(reason, *, source="", phase="", command=None, fallback="INTERNAL_
         "configuration": "planning", "planner_call": "planning", "storage": "persistence",
         "authorization": "approval", "transport": "write", "execution": "feedback", "runtime": "runtime",
     }.get(source, "runtime")
-    result = {"error_id": str(uuid4()), "code": code, "source": source, "message": MESSAGES[code],
+    error_id = reason.error_id if isinstance(reason, ReadinessBlocked) else str(uuid4())
+    result = {"error_id": error_id, "code": code, "source": source, "message": MESSAGES[code],
               "phase": phase, "occurred_at": datetime.now(timezone.utc).isoformat()}
     if command:
         result.update(step_id=command.step_id, command_id=command.command_id)
