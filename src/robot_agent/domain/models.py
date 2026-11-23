@@ -101,7 +101,7 @@ class CandidatePlan:
         if not isinstance(value, dict) or set(value) - allowed:
             raise PlanError("invalid candidate fields")
         outcome = value.get("outcome")
-        if not isinstance(outcome, str) or outcome not in {"plan", "clarify", "unsupported", "reply"}:
+        if not isinstance(outcome, str) or outcome not in {"plan", "unsupported", "reply"}:
             raise PlanError("invalid candidate outcome")
         raw_steps = value.get("steps", [])
         if not isinstance(raw_steps, list):
@@ -124,8 +124,6 @@ class CandidatePlan:
         question = value.get("question", "")
         if not isinstance(question, str):
             raise PlanError("invalid question")
-        if outcome == "clarify" and not question.strip():
-            raise PlanError("clarify requires question")
         reason = value.get("reason", "")
         if not isinstance(reason, str):
             raise PlanError("invalid reason")

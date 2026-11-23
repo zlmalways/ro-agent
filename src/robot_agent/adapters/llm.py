@@ -19,7 +19,7 @@ PLANNING_RULES = (
     "不要把普通问候或咨询当成缺少任务信息的澄清，不要为普通回复生成动作或声称机器人已经执行。"
     "需要执行时返回 outcome=plan 和 steps；步骤必须按顺序执行，第一步 depends_on 为空，后续步骤只依赖前一步。"
     "move_to 的 args 必须是 {location}，vla_skill 的 args 必须是 {skill_id}，只能使用资料中出现的地点和技能标识。"
-    "只有用户要求执行机器人任务，但必要信息不足或需要用户选择时，才返回 outcome=clarify、question、required_slots，不能返回步骤。"
+    "执行任务缺少必要信息或需要用户选择时，用 outcome=reply 追问，把问题写在 text 中，steps 留空。"
     "能力不支持时返回 outcome=unsupported、reason，不能返回步骤。"
     "所有结果包含 outcome、text、steps、question、required_slots、reason。reply 的 steps、required_slots 为空数组，question、reason 为空字符串；其他结果的 text 为空字符串。"
     "不要生成 customer_id、approval、source_refs、validation、工具调用或执行结果字段。"
@@ -34,7 +34,7 @@ def _object_schema(**properties):
 _STRING = {"type": "string"}
 _STRINGS = {"type": "array", "items": _STRING}
 _PLAN_SCHEMA = _object_schema(
-    outcome={"type": "string", "enum": ["plan", "clarify", "unsupported", "reply"]},
+    outcome={"type": "string", "enum": ["plan", "unsupported", "reply"]},
     text=_STRING,
     steps={"type": "array", "items": _object_schema(
         step_id=_STRING,
@@ -109,7 +109,7 @@ class OpenAICompatiblePlanner:
                 history.append({"role": "assistant", "content": repair.previous_output})
             system_prompt += (
                 "\n上一轮输出未通过程序校验，尚未执行任何动作。请根据原用户要求和原机器人资料重新返回完整 JSON。"
-                "修正下列错误，不要解释纠错过程或声称动作已执行；信息不足可澄清，能力不足可返回 unsupported。"
+                "修正下列错误，不要解释纠错过程或声称动作已执行；信息不足请用 reply 返回需要用户补充的问题，能力不足可返回 unsupported。"
                 "\n系统校验反馈：" + json.dumps({"error": repair.feedback}, ensure_ascii=False)
             )
         relay = self.config.name == "relay"

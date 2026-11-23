@@ -568,10 +568,6 @@ class TaskService:
             if candidate.outcome == "reply":
                 changed = replace(task, state="REPLIED", reason_code="", clarification="", clarification_id="")
                 assistant_message = ("reply", candidate.text)
-            elif candidate.outcome == "clarify":
-                changed = replace(task, state="NEEDS_CLARIFICATION", clarification=candidate.question,
-                                  clarification_id=str(uuid4()))
-                assistant_message = ("clarify", candidate.question)
             elif candidate.outcome == "unsupported":
                 changed = replace(task, state="REPLIED", reason_code="", clarification="", clarification_id="")
                 assistant_message = ("reply", candidate.reason or "当前能力无法完成这个任务。")
