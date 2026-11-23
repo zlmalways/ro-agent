@@ -126,6 +126,30 @@ class InputService:
         self._record_task_link(context, request_key, input_id, view)
         return view
 
+    async def submit_text(self, context, request_key, text, *, conversation_id=None):
+        """Submit trusted text after an upstream component has already transcribed it."""
+        if not isinstance(text, str) or not text.strip():
+            raise PlanError("TEXT_REQUIRED")
+        if not request_key:
+            raise PlanError("REQUEST_KEY_REQUIRED")
+        if conversation_id is not None:
+            async with self.service.store.unit_of_work(context) as tx:
+                await self.service.require_conversation_control(tx, context, conversation_id)
+        value = TaskInput(request_key, "voice", text.strip(), "")
+        view = await self.submit_value(context, value, request_key, conversation_id=conversation_id)
+        if conversation_id is not None:
+            # The conversation may have advanced since this request was accepted.
+            async with self.service.store.unit_of_work(context) as tx:
+                request = await tx.get_request(context.customer_id, context.actor_id, request_key, "message")
+            return await self.service.get_turn(context, conversation_id, request[1])
+        return view
+
+    async def submit_value(self, context, value, request_key, *, conversation_id=None, wait_for_plan=False):
+        """Common admission path for recognized audio and incoming text."""
+        if conversation_id is None:
+            return await self.service.submit(context, value, request_key, wait_for_plan=wait_for_plan)
+        return await self.service.message(context, conversation_id, value, request_key)
+
     @staticmethod
     def _record_task_link(context, request_key, input_id, view):
         # This point is after input/task linkage is committed, not task creation.

@@ -8,7 +8,7 @@ import anyio
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from robot_agent.application.pcm_segment_service import SpeechActivity
-from robot_agent.domain.models import ConflictError, DependencyUnavailable, PlanError
+from robot_agent.domain.models import ConflictError, DependencyUnavailable, NotFoundError, PlanError
 from robot_agent.protocol.dlv0_schema import ready_frame
 from robot_agent.protocol.voice_schema import input_error_frame
 from robot_agent.timing import TimePoint, record_timing
@@ -259,6 +259,25 @@ async def robot_ws(ws: WebSocket):
                             raise PlanError("invalid capture_id") from None
                     await voice.deliver(voice_session, audio, woke=frame.get("woke") is True,
                                         capture_id=capture_id)
+                elif frame.get("type") == "text":
+                    if voice_session is None:
+                        await ws.close(code=1013)
+                        return
+                    request_key = frame.get("request_key")
+                    text = frame.get("text")
+                    conversation_id = frame.get("conversation_id")
+                    if not isinstance(request_key, str) or not request_key:
+                        raise PlanError("invalid text request_key")
+                    if not isinstance(text, str) or not text.strip():
+                        raise PlanError("invalid text")
+                    if conversation_id is not None and not isinstance(conversation_id, str):
+                        raise PlanError("invalid conversation_id")
+                    try:
+                        await voice.deliver_text(voice_session, text,
+                                                 request_key=request_key,
+                                                 conversation_id=conversation_id)
+                    except (DependencyUnavailable, PlanError, ConflictError, NotFoundError) as exc:
+                        await send_json({**input_error_frame(str(exc)), "request_key": request_key})
                 elif frame.get("type") == "interrupt":
                     continue
                 else:

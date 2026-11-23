@@ -118,6 +118,22 @@ class VoiceService:
                 if frame["type"] == "task_state":
                     self.watch_task(session, frame)
 
+    async def deliver_text(self, session, text, *, request_key, conversation_id=None):
+        """Accept text from a trusted upstream voice model on the voice socket."""
+        binding = session["binding"]
+        if self.sessions.get((binding["customer_id"], binding["binding_id"])) is not session:
+            return
+        context = TrustedContext(binding["customer_id"], "robot", binding["binding_id"])
+        async with session["lock"]:
+            view = await self.inputs.submit_text(context, request_key, text,
+                                                 conversation_id=conversation_id)
+        receipt = {"type": "text_task", "request_key": request_key,
+                   "task_id": view.task_id, "turn_id": view.turn_id or view.task_id,
+                   "version": view.version, "state": view.state}
+        await session["send"](receipt)
+        self.watch_task(session, receipt)
+        return receipt
+
     async def deliver_pcm(self, session, segment, *, capture_id=None):
         """Submit one complete PCM-derived WAV through the existing recorded input workflow."""
         if not self.allow_unwoken_pcm and self.wake_evaluation is None:
@@ -190,7 +206,10 @@ class VoiceService:
                 log.info("voice task status read recovered task=%s turn=%s", task_id, turn_id)
             read_failed = False
             if view.version != previous_version:
-                yield task_frame(view, robot_id=robot_id, **correlation)
+                frame = task_frame(view, robot_id=robot_id, **correlation)
+                if "request_key" in receipt:
+                    frame["request_key"] = receipt["request_key"]
+                yield frame
                 previous_version = view.version
             if turn_finished(view):
                 return
