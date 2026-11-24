@@ -41,11 +41,20 @@ def validate_plan(candidate: CandidatePlan, snapshot: ContextSnapshot, catalog: 
             reject("ACTION_UNSUPPORTED", f"动作 {step.action!r} 不在本次提供的机器人动作清单中。",
                    source="resources")
         required = catalog.required[step.action]
-        if set(step.args) != set(required):
+        args = dict(step.args)
+        # 临时修改：仅“冰箱”和“冰箱旁”的导航默认使用 manipulation；模型输出格式保持不变。
+        fridge_navigation = step.action == "move_to" and args.get("location") in ("冰箱", "冰箱旁")
+        fields = required
+        # 已保存计划会再次校验，需接受代码补充的到达模式。
+        if fridge_navigation and not model_output and "arrival_mode" in args:
+            fields = (*required, "arrival_mode")
+        if set(args) != set(fields):
             reject("invalid action parameters",
-                   f"步骤 {step.step_id!r} 的 args 字段必须且只能包含 {list(required)!r}。")
-        if any(not isinstance(step.args[key], str) or not step.args[key].strip() for key in required):
+                   f"步骤 {step.step_id!r} 的 args 字段必须且只能包含 {list(fields)!r}。")
+        if any(not isinstance(args[key], str) or not args[key].strip() for key in required):
             reject("empty or invalid action parameter", f"步骤 {step.step_id!r} 的参数值必须是非空字符串。")
+        if fridge_navigation and "arrival_mode" in args and args["arrival_mode"] not in ("standard", "manipulation"):
+            reject("invalid arrival mode", f"步骤 {step.step_id!r} 的 arrival_mode 必须是 standard 或 manipulation。")
         refs = []
         if step.action == "move_to":
             ref = snapshot.waypoints.get(step.args["location"])
@@ -54,6 +63,8 @@ def validate_plan(candidate: CandidatePlan, snapshot: ContextSnapshot, catalog: 
                        f"地点 {step.args['location']!r} 不在本次提供的可用地点清单中，请使用准确名称；信息不足时澄清。",
                        source="resources")
             refs.append(ref)
+            if fridge_navigation:
+                args.setdefault("arrival_mode", "manipulation")
         elif step.action == "vla_skill":
             ref = snapshot.brain_skills.get(step.args["skill_id"])
             if not ref:
@@ -63,7 +74,7 @@ def validate_plan(candidate: CandidatePlan, snapshot: ContextSnapshot, catalog: 
             refs.append(ref)
         else:
             raise PreflightBlocked("ACTION_GROUNDING_UNAVAILABLE", source="configuration")
-        grounded.append(PlanStep(step.step_id, step.action, dict(step.args), step.depends_on, tuple(refs)))
+        grounded.append(PlanStep(step.step_id, step.action, args, step.depends_on, tuple(refs)))
         seen.add(step.step_id)
         previous = step.step_id
     return ValidationResult(tuple(grounded), snapshot.snapshot_id)
